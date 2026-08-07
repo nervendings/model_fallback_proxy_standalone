@@ -1,5 +1,5 @@
 [Unit]
-Description=Codex model capacity fallback proxy
+Description=Continue Engineer model capacity fallback proxy
 After=network-online.target
 StartLimitIntervalSec=300
 StartLimitBurst=10
