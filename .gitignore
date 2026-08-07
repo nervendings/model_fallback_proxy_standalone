@@ -1,0 +1,28 @@
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+*.local
+*.secret
+*.pem
+*.key
+
+# Python and virtual environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Runtime state and logs
+state/
+logs/
+*.jsonl
+*.log
+
+# Local planning and editor files
+work_plans/
+.idea/
+.vscode/
+.DS_Store
