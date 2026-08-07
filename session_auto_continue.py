@@ -22,13 +22,20 @@ DEFAULT_CODEX_BIN = Path(shutil.which("codex") or "codex")
 DEFAULT_PROMPT = "继续"
 DEFAULT_REASONING_EFFORT = "xhigh"
 DEFAULT_BACKGROUND_FALLBACK = True
+DEFAULT_NOTIFICATION_CHANNEL = "local"
+DEFAULT_LINUX_NOTIFY = True
+DEFAULT_NOTIFY_BIN = Path("notify-send")
 DEFAULT_FEISHU_CHAT_ID = ""
 DEFAULT_FEISHU_AS = "bot"
 DEFAULT_LARK_CLI = Path("lark-cli")
+LOCAL_NOTIFY_TIMEOUT_SECONDS = 5
 FEISHU_NOTIFY_TIMEOUT_SECONDS = 15
-DEFAULT_FEISHU_NOTIFY_INTERVAL_SECONDS = 600.0
+DEFAULT_NOTIFY_INTERVAL_SECONDS = 600.0
+# 旧名称保留，避免外部调用方导入常量时失效。
+DEFAULT_FEISHU_NOTIFY_INTERVAL_SECONDS = DEFAULT_NOTIFY_INTERVAL_SECONDS
 FEISHU_NOTIFY_RETRY_SECONDS = 60.0
-MAX_FEISHU_NOTIFICATION_ITEMS = 256
+MAX_NOTIFICATION_ITEMS = 256
+MAX_FEISHU_NOTIFICATION_ITEMS = MAX_NOTIFICATION_ITEMS
 FAILURE_WINDOW_SECONDS = 600
 FAILURE_HISTORY_LIMIT = 32
 MAX_HANDLED_TURNS = 64
@@ -124,6 +131,34 @@ def getFloatEnv(name: str, default: float) -> float:
         return default
 
 
+def getNotificationChannel(value: str | None) -> str:
+    channel = str(value or "").strip().lower().replace("_", "-")
+    aliases = {
+        "": DEFAULT_NOTIFICATION_CHANNEL,
+        "notify-send": "local",
+        "linux": "local",
+        "linux-notify": "local",
+        "disabled": "none",
+        "off": "none",
+    }
+    channel = aliases.get(channel, channel)
+    if channel not in {"none", "local", "feishu"}:
+        logging.warning("unknown auto-continue notification channel=%s; use local", channel)
+        return DEFAULT_NOTIFICATION_CHANNEL
+    return channel
+
+
+def getNotificationInterval(default: float = DEFAULT_NOTIFY_INTERVAL_SECONDS) -> float:
+    """读取新配置，兼容旧 Feishu 汇总窗口配置。"""
+    for name in (
+        "CODEX_AUTO_CONTINUE_NOTIFY_INTERVAL",
+        "CODEX_AUTO_CONTINUE_FEISHU_NOTIFY_INTERVAL",
+    ):
+        if name in os.environ:
+            return getFloatEnv(name, default)
+    return default
+
+
 class SessionAutoContinue:
     def __init__(
         self,
@@ -142,6 +177,9 @@ class SessionAutoContinue:
         feishu_as: str | None = None,
         notification_sender: Callable[[dict[str, Any]], None] | None = None,
         notification_interval_seconds: float | None = None,
+        notification_channel: str | None = None,
+        linux_notify: bool | None = None,
+        notify_bin: Path | str | None = None,
     ) -> None:
         self.session_root = session_root
         self.state_path = state_path
@@ -153,11 +191,18 @@ class SessionAutoContinue:
         self.time_fn = time_fn
         self.foreground_adapter = foreground_adapter
         self.allow_background_fallback = allow_background_fallback
-        self.feishu_notify = (
-            isEnabled(os.environ.get("CODEX_AUTO_CONTINUE_FEISHU_NOTIFY"))
-            if feishu_notify is None
-            else bool(feishu_notify)
+        self.notification_channel = self.resolveNotificationChannel(
+            notification_channel=notification_channel,
+            feishu_notify=feishu_notify,
+            linux_notify=linux_notify,
         )
+        # 旧属性保留给集成方；新代码应使用 notification_channel。
+        self.feishu_notify = self.notification_channel == "feishu"
+        self.linux_notify = self.notification_channel == "local"
+        configured_notify_bin = notify_bin or os.environ.get(
+            "CODEX_AUTO_CONTINUE_NOTIFY_BIN", str(DEFAULT_NOTIFY_BIN)
+        )
+        self.notify_bin = Path(str(configured_notify_bin).strip() or str(DEFAULT_NOTIFY_BIN))
         self.feishu_chat_id = str(
             feishu_chat_id
             or os.environ.get("CODEX_AUTO_CONTINUE_FEISHU_CHAT_ID", DEFAULT_FEISHU_CHAT_ID)
@@ -172,17 +217,56 @@ class SessionAutoContinue:
             float(
                 notification_interval_seconds
                 if notification_interval_seconds is not None
-                else getFloatEnv(
-                    "CODEX_AUTO_CONTINUE_FEISHU_NOTIFY_INTERVAL",
-                    DEFAULT_FEISHU_NOTIFY_INTERVAL_SECONDS,
-                )
+                else getNotificationInterval()
             ),
         )
-        self.notification_sender = notification_sender or self.sendFeishuNotification
+        self.notification_sender = notification_sender or self.selectNotificationSender()
         self.state = self.loadState()
         if not self.allow_background_fallback:
             self.migrateToForegroundOnly()
         self.processes: dict[str, subprocess.Popen[str]] = {}
+
+    def resolveNotificationChannel(
+        self,
+        notification_channel: str | None,
+        feishu_notify: bool | None,
+        linux_notify: bool | None,
+    ) -> str:
+        """按新配置优先、旧 Feishu 开关兼容的规则选择通知通道。"""
+        configured_channel = notification_channel
+        if configured_channel is None:
+            configured_channel = os.environ.get("CODEX_AUTO_CONTINUE_NOTIFICATION_CHANNEL")
+        if str(configured_channel or "").strip():
+            return getNotificationChannel(configured_channel)
+
+        # 旧开关显式启用时仍切换到 Feishu；没有旧配置则默认本地通知。
+        if feishu_notify is True or (
+            feishu_notify is None
+            and isEnabled(os.environ.get("CODEX_AUTO_CONTINUE_FEISHU_NOTIFY"))
+        ):
+            return "feishu"
+
+        configured_linux = linux_notify
+        if configured_linux is None and "CODEX_AUTO_CONTINUE_LINUX_NOTIFY" in os.environ:
+            configured_linux = isEnabled(os.environ.get("CODEX_AUTO_CONTINUE_LINUX_NOTIFY"))
+        if configured_linux is not None:
+            return "local" if configured_linux else "none"
+
+        # 传入旧 feishu_notify=False 表示兼容旧调用方的“关闭通知”语义。
+        if feishu_notify is False:
+            return "none"
+        return DEFAULT_NOTIFICATION_CHANNEL
+
+    def selectNotificationSender(self) -> Callable[[dict[str, Any]], None]:
+        if self.notification_channel == "feishu":
+            return self.sendFeishuNotification
+        if self.notification_channel == "local":
+            return self.sendLocalNotification
+        return self.sendDisabledNotification
+
+    @staticmethod
+    def sendDisabledNotification(_batch: dict[str, Any]) -> None:
+        return None
 
     def loadState(self) -> dict[str, Any]:
         try:
@@ -448,17 +532,14 @@ class SessionAutoContinue:
     def formatNotificationTime(timestamp: float) -> str:
         return time.strftime("%H:%M:%S", time.localtime(float(timestamp)))
 
-    def sendFeishuNotification(self, batch: dict[str, Any]) -> None:
-        if not self.feishu_chat_id:
-            return
-        lark_cli = shutil.which("lark-cli") or str(DEFAULT_LARK_CLI)
+    def buildNotificationMessage(self, batch: dict[str, Any]) -> str:
         raw_triggers = batch.get("triggers")
         if not isinstance(raw_triggers, list):
             # 兼容旧调用方传入单条触发记录。
             raw_triggers = [batch]
         triggers = [item for item in raw_triggers if isinstance(item, dict)]
         if not triggers:
-            return
+            return ""
         window_started_at = float(batch.get("window_started_at") or triggers[0].get("ts") or self.time_fn())
         window_ended_at = float(batch.get("window_ended_at") or self.time_fn())
         lines = [
@@ -483,6 +564,60 @@ class SessionAutoContinue:
         if omitted_count:
             lines.append(f"其余 {omitted_count} 次触发已合并省略。")
         message = "\n".join(lines)
+        return message
+
+    def sendLocalNotification(self, batch: dict[str, Any]) -> None:
+        """使用 Linux notify-send 汇总通知；不可用时仅告警并丢弃本批通知。"""
+        raw_triggers = batch.get("triggers")
+        if not isinstance(raw_triggers, list):
+            raw_triggers = [batch]
+        triggers = [item for item in raw_triggers if isinstance(item, dict)]
+        if not triggers:
+            return
+        notify_bin = shutil.which(str(self.notify_bin))
+        if not notify_bin:
+            logging.warning(
+                "auto-continue local notification unavailable notify-send=%s",
+                self.notify_bin,
+            )
+            return
+        try:
+            result = subprocess.run(
+                [notify_bin, "Codex 自动续跑", self.buildNotificationMessage(batch)],
+                text=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=LOCAL_NOTIFY_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            logging.warning(
+                "auto-continue local notification failed error=%s",
+                type(exc).__name__,
+            )
+            return
+        if result.returncode != 0:
+            logging.warning(
+                "auto-continue local notification failed rc=%d",
+                int(result.returncode),
+            )
+
+    def sendFeishuNotification(self, batch: dict[str, Any]) -> None:
+        if not self.feishu_chat_id:
+            logging.warning("auto-continue Feishu notification skipped: chat_id is not configured")
+            return
+        lark_cli = shutil.which(str(DEFAULT_LARK_CLI))
+        if not lark_cli:
+            logging.warning("auto-continue Feishu notification skipped: lark-cli is unavailable")
+            return
+        raw_triggers = batch.get("triggers")
+        if not isinstance(raw_triggers, list):
+            # 兼容旧调用方传入单条触发记录。
+            raw_triggers = [batch]
+        triggers = [item for item in raw_triggers if isinstance(item, dict)]
+        if not triggers:
+            return
+        message = self.buildNotificationMessage(batch)
         idempotency_seed = "codex-auto-continue-summary:" + json.dumps(
             triggers,
             ensure_ascii=False,
@@ -523,7 +658,7 @@ class SessionAutoContinue:
         session = self.getSessionState(session_id)
         attempt_count = int(session.get("auto_continue_attempts") or 0) + 1
         session["auto_continue_attempts"] = attempt_count
-        if not self.feishu_notify:
+        if self.notification_channel == "none":
             return
         now = self.time_fn()
         queue = self.state.setdefault("notification_queue", [])
@@ -543,8 +678,8 @@ class SessionAutoContinue:
                 "ts": now,
             }
         )
-        if len(queue) > MAX_FEISHU_NOTIFICATION_ITEMS:
-            overflow = len(queue) - MAX_FEISHU_NOTIFICATION_ITEMS
+        if len(queue) > MAX_NOTIFICATION_ITEMS:
+            overflow = len(queue) - MAX_NOTIFICATION_ITEMS
             del queue[:overflow]
             self.state["notification_omitted_count"] = int(
                 self.state.get("notification_omitted_count") or 0
@@ -552,7 +687,7 @@ class SessionAutoContinue:
 
     def flushSuccessNotifications(self, force: bool = False) -> bool:
         """按 10 分钟窗口发送成功触发汇总；失败则保留队列等待重试。"""
-        if not self.feishu_notify:
+        if self.notification_channel == "none":
             return False
         queue = self.state.get("notification_queue")
         if not isinstance(queue, list) or not queue:
@@ -572,7 +707,7 @@ class SessionAutoContinue:
         except Exception as exc:
             self.state["notification_next_flush_at"] = now + FEISHU_NOTIFY_RETRY_SECONDS
             logging.warning(
-                "auto-continue Feishu notification failed items=%d error=%s",
+                "auto-continue notification failed items=%d error=%s",
                 len(queue),
                 type(exc).__name__,
             )
@@ -875,7 +1010,11 @@ def parseArgs() -> argparse.Namespace:
     parser.add_argument(
         "--feishu-notify",
         action="store_true",
-        default=isEnabled(os.environ.get("CODEX_AUTO_CONTINUE_FEISHU_NOTIFY")),
+        default=(
+            isEnabled(os.environ.get("CODEX_AUTO_CONTINUE_FEISHU_NOTIFY"))
+            if "CODEX_AUTO_CONTINUE_FEISHU_NOTIFY" in os.environ
+            else None
+        ),
         help="每次成功触发续跑后发送一条飞书通知",
     )
     parser.add_argument(
@@ -891,12 +1030,17 @@ def parseArgs() -> argparse.Namespace:
     )
     parser.add_argument(
         "--feishu-notify-interval-seconds",
+        "--notify-interval-seconds",
+        dest="notify_interval_seconds",
         type=float,
-        default=getFloatEnv(
-            "CODEX_AUTO_CONTINUE_FEISHU_NOTIFY_INTERVAL",
-            DEFAULT_FEISHU_NOTIFY_INTERVAL_SECONDS,
-        ),
-        help="飞书成功触发汇总窗口，默认 600 秒",
+        default=getNotificationInterval(),
+        help="通知汇总窗口，默认 600 秒；兼容旧版参数名",
+    )
+    parser.add_argument(
+        "--notification-channel",
+        choices=("none", "local", "feishu"),
+        default=os.environ.get("CODEX_AUTO_CONTINUE_NOTIFICATION_CHANNEL"),
+        help="通知通道：none/local/feishu；默认 local",
     )
     parser.add_argument(
         "--enable-foreground",
@@ -961,7 +1105,8 @@ def main() -> int:
         feishu_notify=args.feishu_notify,
         feishu_chat_id=args.feishu_chat_id,
         feishu_as=args.feishu_as,
-        notification_interval_seconds=args.feishu_notify_interval_seconds,
+        notification_channel=args.notification_channel,
+        notification_interval_seconds=args.notify_interval_seconds,
     )
     watcher.run(once=args.once)
     return 0

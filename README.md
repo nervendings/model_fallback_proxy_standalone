@@ -38,12 +38,16 @@ CODEX_AUTO_CONTINUE_BACKGROUND_FALLBACK=1
 CODEX_AUTO_CONTINUE_FRONTEND_CHANNEL=auto
 CODEX_AUTO_CONTINUE_TERMINAL_PTY=0
 CODEX_AUTO_CONTINUE_TERMINAL_ASSUME_READY=0
+CODEX_AUTO_CONTINUE_LINUX_NOTIFY=1
+CODEX_AUTO_CONTINUE_NOTIFY_BIN=notify-send
+CODEX_AUTO_CONTINUE_NOTIFY_INTERVAL=600
 ```
 
 - 停止自动续跑：`systemctl --user disable --now codex-session-auto-continue.service`。
 - 只观察不注入：将 `CODEX_AUTO_CONTINUE_FOREGROUND=0` 后重启 watcher。
 - `CODEX_AUTO_CONTINUE_BACKGROUND_FALLBACK=1` 是当前默认兜底开关；它只在前台目标不可用或模型需要切换时启动 `resume`。
-- `CODEX_AUTO_CONTINUE_FEISHU_NOTIFY=1` 时，前台成功输入“继续”或后台成功启动 `resume` 会进入飞书汇总队列，默认每 600 秒发送一条汇总；发送失败只记录告警并保留队列重试，不阻塞续跑。通知目标必须通过 `CODEX_AUTO_CONTINUE_FEISHU_CHAT_ID` 配置，仓库不提供默认群 ID。
+- `CODEX_AUTO_CONTINUE_LINUX_NOTIFY=1` 时，使用系统 `notify-send` 发送本地桌面通知；成功触发进入汇总队列，默认每 600 秒发送一条。没有桌面会话或 `notify-send` 时只记录告警，不阻塞续跑。
+- 飞书通知不是运行依赖。只有显式设置 `CODEX_AUTO_CONTINUE_FEISHU_NOTIFY=1` 且配置 `CODEX_AUTO_CONTINUE_FEISHU_CHAT_ID` 时才调用 `lark-cli`；未配置时不会加载或调用 Feishu CLI。
 - 普通终端建议在 tmux 中启动 Codex，例如 `tmux new-session -A -s codex` 后运行 `codex`；watcher 会校验 pane tty，再用 `tmux send-keys "继续" C-m`，效果与手动输入一致。
 - 裸终端需要同时设置 `CODEX_AUTO_CONTINUE_TERMINAL_PTY=1` 和 `CODEX_AUTO_CONTINUE_TERMINAL_ASSUME_READY=1`。注入使用 `TIOCSTI`，部分发行版内核会禁用它；禁用时不会误写终端输出，自动回退后台 `resume`。风险较高，默认关闭。
 - 虚拟员工需配置可执行 hook，例如 `CODEX_AUTO_CONTINUE_VIRTUAL_EMPLOYEE_HOOK=/绝对路径/continue-hook`。hook 从 stdin 接收 JSON，成功返回码 `0`；请求包含 `protocol=1`、`action=continue`、`session_id`、`event_id`、`hook_id`、`payload=继续\r` 和 `input_data64`。禁止 shell 拼接和把 token 写入日志。
@@ -97,9 +101,9 @@ CODEX_AUTO_CONTINUE_FOREGROUND=0 CODEX_AUTO_CONTINUE_BACKGROUND_FALLBACK=0 \
 ## 安装与回滚
 
 ```bash
-mkdir -p "$HOME/.config/codex-model-fallback-proxy"
-install -m 600 .env.example "$HOME/.config/codex-model-fallback-proxy/environment"
-# 编辑 environment，至少填写 CODEX_FALLBACK_UPSTREAM_URL；需要飞书通知时再填写 chat_id。
+mkdir -p "$HOME/.config/codex-model-fallback-proxy-standalone"
+install -m 600 .env.example "$HOME/.config/codex-model-fallback-proxy-standalone/environment"
+# 编辑 environment，至少填写 CODEX_FALLBACK_UPSTREAM_URL；本地通知依赖 notify-send，飞书配置保持关闭即可。
 systemctl --user daemon-reload
 systemctl --user enable --now codex-model-fallback-proxy.service
 systemctl --user enable --now codex-session-auto-continue.service

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -431,6 +432,73 @@ class SessionAutoContinueTest(unittest.TestCase):
             watcher.scan()
             self.assertEqual(len(notifications), 1)
             self.assertEqual(notifications[0]["triggers"][0]["turn_id"], "turn-window")
+
+    def test_default_notification_channel_is_local_without_feishu(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            with patch.dict(os.environ, {}, clear=True):
+                watcher = SessionAutoContinue(state_path=Path(temporary_dir) / "state.json")
+            self.assertEqual(watcher.notification_channel, "local")
+            self.assertTrue(watcher.linux_notify)
+            self.assertFalse(watcher.feishu_notify)
+
+    def test_local_notification_uses_notify_send_without_feishu_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            with patch("session_auto_continue.shutil.which", return_value="/usr/bin/notify-send") as which_mock:
+                with patch("session_auto_continue.subprocess.run") as run_mock:
+                    run_mock.return_value.returncode = 0
+                    watcher = SessionAutoContinue(
+                        state_path=Path(temporary_dir) / "state.json",
+                        notification_channel="local",
+                        notify_bin="notify-send",
+                    )
+                    watcher.sendLocalNotification(
+                        {
+                            "triggers": [
+                                {
+                                    "session_id": SESSION_ID,
+                                    "turn_id": "turn-local-notify",
+                                    "model": "gpt-5.6-luna",
+                                    "mode": "foreground",
+                                    "attempt_count": 2,
+                                    "ts": 1000.0,
+                                }
+                            ],
+                            "window_started_at": 1000.0,
+                            "window_ended_at": 1600.0,
+                        }
+                    )
+            which_mock.assert_called_once_with("notify-send")
+            command = run_mock.call_args.args[0]
+            self.assertEqual(command[:2], ["/usr/bin/notify-send", "Codex 自动续跑"])
+            self.assertIn("10 分钟汇总", command[2])
+            self.assertIn("尝试次数：2次", command[2])
+
+    def test_missing_notify_send_does_not_block(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            watcher = SessionAutoContinue(
+                state_path=Path(temporary_dir) / "state.json",
+                notification_channel="local",
+                notify_bin="notify-send",
+            )
+            with patch("session_auto_continue.shutil.which", return_value=None), patch(
+                "session_auto_continue.subprocess.run"
+            ) as run_mock:
+                watcher.sendLocalNotification({"triggers": [{"session_id": SESSION_ID, "turn_id": "t"}]})
+            run_mock.assert_not_called()
+
+    def test_local_success_is_queued_and_flushed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            notifications: list[dict[str, Any]] = []
+            watcher = SessionAutoContinue(
+                state_path=Path(temporary_dir) / "state.json",
+                notification_channel="local",
+                notification_sender=notifications.append,
+                time_fn=lambda: 1000.0,
+            )
+            watcher.notifySuccess(SESSION_ID, "turn-local-queue", "gpt-5.6-luna", "foreground")
+            self.assertEqual(len(watcher.state["notification_queue"]), 1)
+            self.assertTrue(watcher.flushSuccessNotifications(force=True))
+            self.assertEqual(notifications[0]["triggers"][0]["turn_id"], "turn-local-queue")
 
     def test_feishu_notification_command_uses_configured_target(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:

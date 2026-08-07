@@ -10,7 +10,10 @@ Environment=CODEX_AUTO_CONTINUE_BACKGROUND_FALLBACK=1
 Environment=CODEX_AUTO_CONTINUE_FRONTEND_CHANNEL=auto
 Environment=CODEX_AUTO_CONTINUE_TERMINAL_PTY=0
 Environment=CODEX_AUTO_CONTINUE_TERMINAL_ASSUME_READY=0
-EnvironmentFile=-%h/.config/codex-model-fallback-proxy/environment
+Environment=CODEX_AUTO_CONTINUE_LINUX_NOTIFY=1
+Environment=CODEX_AUTO_CONTINUE_NOTIFY_BIN=notify-send
+Environment=CODEX_AUTO_CONTINUE_NOTIFY_INTERVAL=600
+EnvironmentFile=-%h/.config/codex-model-fallback-proxy-standalone/environment
 ExecStart=%h/model_fallback_proxy_standalone/.venv/bin/python %h/model_fallback_proxy_standalone/session_auto_continue.py
 Restart=always
 RestartSec=3

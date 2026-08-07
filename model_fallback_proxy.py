@@ -75,8 +75,8 @@ def readUpstreamUrl(explicit_url: str | None = None) -> str:
     if not upstream_url:
         raise RuntimeError("CODEX_FALLBACK_UPSTREAM_URL is required")
     parsed = urlsplit(upstream_url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password:
-        raise RuntimeError("CODEX_FALLBACK_UPSTREAM_URL must be an http(s) URL without embedded credentials")
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or "@" in parsed.netloc:
+        raise RuntimeError("CODEX_FALLBACK_UPSTREAM_URL must be an http(s) URL without embedded userinfo")
     return upstream_url.rstrip("/")
 
 

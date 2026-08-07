@@ -75,7 +75,7 @@ class ModelFallbackProxyTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(RuntimeError):
                 readUpstreamUrl()
         with self.assertRaises(RuntimeError):
-            readUpstreamUrl("https://user:password@example.invalid")
+            readUpstreamUrl("https://user@example.invalid")
 
     def test_http_capacity_fallback_accepts_message_only_json_body(self) -> None:
         body = b'{"message":"Selected model is at capacity. Please try a different model."}'
