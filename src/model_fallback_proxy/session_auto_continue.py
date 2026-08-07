@@ -39,6 +39,9 @@ MAX_FEISHU_NOTIFICATION_ITEMS = MAX_NOTIFICATION_ITEMS
 FAILURE_WINDOW_SECONDS = 600
 FAILURE_HISTORY_LIMIT = 32
 MAX_HANDLED_TURNS = 64
+CONTINUE_BURST_WINDOW_SECONDS = 30.0
+CONTINUE_BURST_LIMIT = 3
+CONTINUE_PAUSE_SECONDS = 30.0
 # codex_exec 是 RoadClaw/虚拟员工常用入口；未配置虚拟员工 hook 时仍只观察。
 WATCHED_ORIGINATORS = {"codex-tui", "codex_exec", "virtual_employee", "roadclaw"}
 MODEL_CHAIN = (
@@ -393,12 +396,67 @@ class SessionAutoContinue:
         sessions = self.state["sessions"]
         value = sessions.get(session_id)
         if not isinstance(value, dict):
-            value = {"failure_times": [], "handled_turn_ids": []}
+            value = {"failure_times": [], "handled_turn_ids": [], "continue_times": []}
             sessions[session_id] = value
         value.setdefault("failure_times", [])
         value.setdefault("handled_turn_ids", [])
         value.setdefault("auto_continue_attempts", 0)
+        value.setdefault("continue_times", [])
+        value.setdefault("continue_paused_until", 0.0)
         return value
+
+    def pruneContinueTimes(self, session: dict[str, Any], now: float) -> list[float]:
+        timestamps: list[float] = []
+        raw_timestamps = session.get("continue_times", [])
+        if not isinstance(raw_timestamps, (list, tuple)):
+            raw_timestamps = []
+        for value in raw_timestamps:
+            try:
+                timestamp = float(value)
+            except (TypeError, ValueError):
+                continue
+            if timestamp > now - CONTINUE_BURST_WINDOW_SECONDS:
+                timestamps.append(timestamp)
+        session["continue_times"] = timestamps[-CONTINUE_BURST_LIMIT:]
+        return session["continue_times"]
+
+    def getContinuePauseUntil(self, session: dict[str, Any], now: float) -> float:
+        timestamps = self.pruneContinueTimes(session, now)
+        try:
+            pause_until = float(session.get("continue_paused_until") or 0.0)
+        except (TypeError, ValueError):
+            pause_until = 0.0
+        if pause_until > now:
+            return pause_until
+        if pause_until:
+            session["continue_paused_until"] = 0.0
+        if len(timestamps) >= CONTINUE_BURST_LIMIT:
+            pause_until = now + CONTINUE_PAUSE_SECONDS
+            session["continue_paused_until"] = pause_until
+            return pause_until
+        return 0.0
+
+    def recordContinue(self, session: dict[str, Any], now: float) -> None:
+        timestamps = self.pruneContinueTimes(session, now)
+        timestamps.append(now)
+        session["continue_times"] = timestamps[-CONTINUE_BURST_LIMIT:]
+        if len(timestamps) >= CONTINUE_BURST_LIMIT:
+            session["continue_paused_until"] = now + CONTINUE_PAUSE_SECONDS
+
+    @staticmethod
+    def resetContinueBurst(session: dict[str, Any]) -> None:
+        session["continue_times"] = []
+        session["continue_paused_until"] = 0.0
+
+    def clearPendingFailures(self, session_id: str) -> None:
+        pending = self.state.get("pending_failures")
+        if not isinstance(pending, list):
+            return
+        self.state["pending_failures"] = [
+            item
+            for item in pending
+            if not isinstance(item, dict) or str(item.get("session_id") or "") != session_id
+        ]
 
     def isProcessAlive(self, pid: int) -> bool:
         if pid <= 0:
@@ -656,6 +714,7 @@ class SessionAutoContinue:
         mode: str,
     ) -> None:
         session = self.getSessionState(session_id)
+        self.recordContinue(session, self.time_fn())
         attempt_count = int(session.get("auto_continue_attempts") or 0) + 1
         session["auto_continue_attempts"] = attempt_count
         if self.notification_channel == "none":
@@ -775,10 +834,18 @@ class SessionAutoContinue:
                 latest_by_session[session_id] = item
         pending = list(latest_by_session.values())
         remaining: list[dict[str, Any]] = []
+        now = self.time_fn()
         for item in pending:
             if not isinstance(item, dict):
                 continue
             session_id = str(item.get("session_id") or "").strip()
+            try:
+                not_before = float(item.get("not_before") or 0.0)
+            except (TypeError, ValueError):
+                not_before = 0.0
+            if not_before > now:
+                remaining.append(item)
+                continue
             if self.isSessionActive(session_id):
                 remaining.append(item)
                 continue
@@ -797,6 +864,38 @@ class SessionAutoContinue:
                 self.handleFailure(file_state, payload, allow_pending=False)
         self.state["pending_failures"] = remaining
 
+    def queuePendingFailure(
+        self,
+        file_state: dict[str, Any],
+        payload: dict[str, Any],
+        not_before: float | None = None,
+    ) -> None:
+        session_id = str(file_state.get("session_id") or "").strip()
+        turn_id = str(payload.get("turn_id") or "").strip()
+        pending = self.state.get("pending_failures")
+        if not isinstance(pending, list):
+            pending = []
+            self.state["pending_failures"] = pending
+        # 按 session 替换旧 pending，而不是累积 turn，保证一次只续跑一次。
+        pending[:] = [
+            item
+            for item in pending
+            if not isinstance(item, dict) or str(item.get("session_id") or "") != session_id
+        ]
+        item: dict[str, Any] = {
+            "session_id": session_id,
+            "turn_id": turn_id,
+            "model": file_state.get("model"),
+            "reasoning_effort": file_state.get("reasoning_effort"),
+            "cwd": file_state.get("cwd"),
+            "frontend_channel": file_state.get("frontend_channel"),
+            "virtual_employee": file_state.get("virtual_employee"),
+            "payload": payload,
+        }
+        if not_before is not None:
+            item["not_before"] = float(not_before)
+        pending.append(item)
+
     def handleFailure(self, file_state: dict[str, Any], payload: dict[str, Any], allow_pending: bool = True) -> None:
         session_id = str(file_state.get("session_id") or "").strip()
         turn_id = str(payload.get("turn_id") or "").strip()
@@ -808,22 +907,7 @@ class SessionAutoContinue:
             return
         if self.isSessionActive(session_id):
             if allow_pending:
-                pending = self.state.setdefault("pending_failures", [])
-                # 按 session 替换旧 pending，而不是累积 turn，保证一次只续跑一次。
-                pending[:] = [
-                    item for item in pending
-                    if not isinstance(item, dict) or str(item.get("session_id") or "") != session_id
-                ]
-                pending.append({
-                    "session_id": session_id,
-                    "turn_id": turn_id,
-                    "model": file_state.get("model"),
-                    "reasoning_effort": file_state.get("reasoning_effort"),
-                    "cwd": file_state.get("cwd"),
-                    "frontend_channel": file_state.get("frontend_channel"),
-                    "virtual_employee": file_state.get("virtual_employee"),
-                    "payload": payload,
-                })
+                self.queuePendingFailure(file_state, payload)
                 self.emitNotice(
                     session_id,
                     turn_id,
@@ -831,6 +915,19 @@ class SessionAutoContinue:
                     "warning",
                 )
             logging.warning("auto-continue queued concurrent failure session=%s turn=%s", session_id, turn_id)
+            return
+        now = self.time_fn()
+        pause_until = self.getContinuePauseUntil(session, now)
+        if pause_until > now:
+            self.queuePendingFailure(file_state, payload, not_before=pause_until)
+            session["last_action"] = "continue_rate_limited"
+            wait_seconds = max(1, int(round(pause_until - now)))
+            self.emitNotice(
+                session_id,
+                turn_id,
+                f"30 秒内已连续发送 {CONTINUE_BURST_LIMIT} 次“继续”，暂停 {wait_seconds} 秒后自动继续。",
+                "warning",
+            )
             return
         handled_turn_ids.append(turn_id)
         session["handled_turn_ids"] = handled_turn_ids[-MAX_HANDLED_TURNS:]
@@ -843,7 +940,6 @@ class SessionAutoContinue:
             capacity_failure and current_model == MODEL_CHAIN[-1]
         )
         resume_model = current_model
-        now = self.time_fn()
         # 容量错误先沿链路下探；到最低档后继续重试，同时只保留有限历史。
         if capacity_failure and current_model in MODEL_CHAIN and current_model != MODEL_CHAIN[-1]:
             resume_model = getNextModel(current_model)
@@ -935,12 +1031,16 @@ class SessionAutoContinue:
             session = self.getSessionState(session_id)
             session["failure_times"] = []
             session["auto_continue_attempts"] = 0
+            self.resetContinueBurst(session)
+            self.clearPendingFailures(session_id)
             session["last_action"] = "manual_abort"
             return
         if event_type == "task_complete" and session_id and not payload.get("error"):
             session = self.getSessionState(session_id)
             session["failure_times"] = []
             session["auto_continue_attempts"] = 0
+            self.resetContinueBurst(session)
+            self.clearPendingFailures(session_id)
             session["last_action"] = "completed"
             return
         if isFailureEvent(payload):

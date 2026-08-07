@@ -140,7 +140,8 @@ class SessionAutoContinueTest(unittest.TestCase):
             session_file = session_root / "session.jsonl"
             session_file.touch()
             commands: list[FakeProcess] = []
-            watcher = self.makeWatcher(root, commands)
+            clock = [1000.0]
+            watcher = self.makeWatcher(root, commands, time_fn=lambda: clock[0])
             self.appendMetadata(session_file)
             self.appendFailure(session_file, "turn-1")
             watcher.scan()
@@ -153,11 +154,82 @@ class SessionAutoContinueTest(unittest.TestCase):
             watcher.scan()
             self.assertEqual(len(commands), 2)
 
-            for turn_id in ("turn-3", "turn-4", "turn-5"):
-                self.appendFailure(session_file, turn_id)
-                watcher.scan()
+            self.appendFailure(session_file, "turn-3")
+            watcher.scan()
+            self.assertEqual(len(commands), 3)
+
+            self.appendFailure(session_file, "turn-4")
+            watcher.scan()
+            self.assertEqual(len(commands), 3)
+            clock[0] += 30.0
+            watcher.scan()
+
+            self.appendFailure(session_file, "turn-5")
+            watcher.scan()
             self.assertEqual(len(commands), 5)
             self.assertEqual(watcher.state["sessions"][SESSION_ID]["last_action"], "background_continued")
+
+    def test_pauses_after_three_continues_in_thirty_seconds_then_resumes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            session_root = root / "sessions"
+            session_root.mkdir()
+            session_file = session_root / "session.jsonl"
+            session_file.touch()
+            commands: list[FakeProcess] = []
+            clock = [100.0]
+            watcher = self.makeWatcher(root, commands, time_fn=lambda: clock[0])
+            self.appendMetadata(session_file)
+
+            for turn_id in ("turn-1", "turn-2", "turn-3"):
+                self.appendFailure(session_file, turn_id)
+                watcher.scan()
+            self.assertEqual(len(commands), 3)
+            session = watcher.state["sessions"][SESSION_ID]
+            self.assertEqual(session["continue_paused_until"], 130.0)
+
+            self.appendFailure(session_file, "turn-4")
+            watcher.scan()
+            self.assertEqual(len(commands), 3)
+            self.assertEqual(session["last_action"], "continue_rate_limited")
+            self.assertEqual(watcher.state["pending_failures"][0]["not_before"], 130.0)
+
+            clock[0] = 129.0
+            watcher.scan()
+            self.assertEqual(len(commands), 3)
+            clock[0] = 130.0
+            watcher.scan()
+            self.assertEqual(len(commands), 4)
+            self.assertEqual(watcher.state["pending_failures"], [])
+
+    def test_completed_session_clears_continue_pause(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            session_root = root / "sessions"
+            session_root.mkdir()
+            session_file = session_root / "session.jsonl"
+            session_file.touch()
+            commands: list[FakeProcess] = []
+            clock = [200.0]
+            watcher = self.makeWatcher(root, commands, time_fn=lambda: clock[0])
+            self.appendMetadata(session_file)
+            for turn_id in ("turn-1", "turn-2", "turn-3"):
+                self.appendFailure(session_file, turn_id)
+                watcher.scan()
+            self.appendFailure(session_file, "turn-4")
+            watcher.scan()
+            self.assertEqual(len(watcher.state["pending_failures"]), 1)
+
+            writeEvent(session_file, {"type": "task_complete", "turn_id": "turn-success"})
+            watcher.scan()
+            session = watcher.state["sessions"][SESSION_ID]
+            self.assertEqual(session["continue_times"], [])
+            self.assertEqual(session["continue_paused_until"], 0.0)
+            self.assertEqual(watcher.state["pending_failures"], [])
+
+            self.appendFailure(session_file, "turn-5")
+            watcher.scan()
+            self.assertEqual(len(commands), 4)
 
     def test_capacity_failures_walk_chain_then_retry_lowest_model_without_limit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
@@ -167,7 +239,8 @@ class SessionAutoContinueTest(unittest.TestCase):
             session_file = session_root / "session.jsonl"
             session_file.touch()
             commands: list[FakeProcess] = []
-            watcher = self.makeWatcher(root, commands)
+            clock = [2000.0]
+            watcher = self.makeWatcher(root, commands, time_fn=lambda: clock[0])
             self.appendMetadata(session_file)
 
             capacity_error = {
@@ -195,6 +268,9 @@ class SessionAutoContinueTest(unittest.TestCase):
 
             self.appendTurnContext(session_file, "gpt-5.6-luna")
             self.appendFailure(session_file, "turn-4", error=capacity_error)
+            watcher.scan()
+            self.assertEqual(len(commands), 3)
+            clock[0] += 30.0
             watcher.scan()
             self.assertEqual(len(commands), 4)
             self.appendTurnContext(session_file, "gpt-5.6-luna")

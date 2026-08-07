@@ -16,7 +16,7 @@
 
 - **请求级容量降级**：代理转发 HTTP 和 SSE 请求；上游返回容量错误、`429`、`503` 或 `529` 且尚未产生有效输出时，自动按模型链重试。
 - **SSE 安全处理**：只在响应尚未向下游输出有效正文时切换模型；已有正文或工具输出后不重放，避免重复执行工具和副作用。
-- **失败自动重试**：watcher 读取 Codex session JSONL，识别非手动失败并自动继续；不设置 3 次或固定次数上限，退避和幂等控制由状态文件负责。
+- **失败自动重试**：watcher 读取 Codex session JSONL，识别非手动失败并自动继续；不设置停止上限。单会话 30 秒内连续成功发送 3 次“继续”后，延迟 30 秒再自动恢复，其它会话不受影响。
 - **前台可见续跑**：优先向当前 Codex 前端发送固定输入 `继续\r`，用户看到的效果与手动输入一致；无法安全定位前台目标时才使用可控的后台 `codex exec resume` 兜底。
 - **多前端支持**：WaveTerm 原生 socket、普通终端 tmux pane、显式虚拟员工 hook，以及受严格开关保护的裸 PTY。`auto` 模式按唯一目标选择通道。
 - **本地通知**：成功触发续跑进入汇总队列，默认每 600 秒用 Linux `notify-send` 发一条摘要；无桌面或没有 `notify-send` 时只记录日志，不影响重试。
@@ -172,7 +172,7 @@ cd "$HOME/model_fallback_proxy_standalone"
 scripts/quality/check_repo_quality.sh
 ```
 
-该门禁包含 shell 语法、Python 编译、51 项单元测试、`git diff --check` 和脱敏/私有路径扫描。只读扫描 watcher：
+该门禁包含 shell 语法、Python 编译、53 项单元测试、`git diff --check` 和脱敏/私有路径扫描。只读扫描 watcher：
 
 ```bash
 CODEX_AUTO_CONTINUE_FOREGROUND=0 \
