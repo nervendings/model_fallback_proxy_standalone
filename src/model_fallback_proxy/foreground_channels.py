@@ -20,14 +20,24 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
-from waveterm_foreground import (
-    ANSI_ESCAPE_RE,
-    PAYLOAD,
-    WaveTermCandidate,
-    WaveTermForegroundAdapter,
-    WaveTermNativeTransport,
-    findSessionBlockId,
-)
+try:
+    from .waveterm_foreground import (
+        ANSI_ESCAPE_RE,
+        PAYLOAD,
+        WaveTermCandidate,
+        WaveTermForegroundAdapter,
+        WaveTermNativeTransport,
+        findSessionBlockId,
+    )
+except ImportError:  # 兼容直接执行旧脚本入口。
+    from waveterm_foreground import (
+        ANSI_ESCAPE_RE,
+        PAYLOAD,
+        WaveTermCandidate,
+        WaveTermForegroundAdapter,
+        WaveTermNativeTransport,
+        findSessionBlockId,
+    )
 
 
 CHANNEL_AUTO = "auto"

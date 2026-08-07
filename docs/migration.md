@@ -27,7 +27,7 @@
    systemctl --user enable --now codex-session-auto-continue.service
    ```
 
-4. 检查 `events.jsonl`。目标无法唯一定位、提示不稳定或 RPC 失败时应记录 `observe_only`/`failed`，不应出现新的后台 `codex exec resume`。
+4. 检查 `$HOME/.local/state/codex-session-auto-continue/events.jsonl`。目标无法唯一定位、提示不稳定或 RPC 失败时应记录 `observe_only`/`failed`，不应出现新的后台 `codex exec resume`。
 
 ## 安全门禁
 

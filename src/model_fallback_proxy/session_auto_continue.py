@@ -1083,7 +1083,10 @@ def parseArgs() -> argparse.Namespace:
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = parseArgs()
-    from foreground_channels import MultiFrontendAdapter
+    try:
+        from .foreground_channels import MultiFrontendAdapter
+    except ImportError:  # 兼容直接执行旧脚本入口。
+        from foreground_channels import MultiFrontendAdapter
 
     foreground_adapter = MultiFrontendAdapter(
         channel=args.frontend_channel,

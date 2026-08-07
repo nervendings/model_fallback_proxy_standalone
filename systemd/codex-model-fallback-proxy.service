@@ -6,9 +6,11 @@ StartLimitBurst=10
 
 [Service]
 Type=simple
-ExecStart=%h/model_fallback_proxy_standalone/.venv/bin/python %h/model_fallback_proxy_standalone/model_fallback_proxy.py
+WorkingDirectory=%h/model_fallback_proxy_standalone
+ExecStart=%h/model_fallback_proxy_standalone/scripts/runtime/run_proxy.sh
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONPATH=%h/model_fallback_proxy_standalone/src
 Environment=CODEX_FALLBACK_LISTEN_HOST=127.0.0.1
 Environment=CODEX_FALLBACK_LISTEN_PORT=4477
 Environment=CODEX_FALLBACK_MODEL_CHAIN=gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna

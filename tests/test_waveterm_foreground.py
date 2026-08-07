@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from waveterm_foreground import PAYLOAD, WaveTermCandidate, WaveTermForegroundAdapter, findSessionBlockId
+from model_fallback_proxy.waveterm_foreground import PAYLOAD, WaveTermCandidate, WaveTermForegroundAdapter, findSessionBlockId
 
 
 class FakeTransport:
@@ -144,9 +144,9 @@ class WaveTermForegroundTest(unittest.TestCase):
         self.assertFalse(transport.calls)
 
     def test_native_transport_uses_handshake_and_controllerinput(self):
-        from waveterm_foreground import WaveTermNativeTransport
+        from model_fallback_proxy.waveterm_foreground import WaveTermNativeTransport
 
-        with patch("waveterm_foreground.socket.socket", FakeSocket):
+        with patch("model_fallback_proxy.waveterm_foreground.socket.socket", FakeSocket):
             transport = WaveTermNativeTransport(socket_path="/tmp/fake-wave.sock", token="jwt")
             with patch.object(Path, "exists", return_value=True):
                 self.assertTrue(transport.controller_input("b1", "5L+XlQ=="))

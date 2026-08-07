@@ -1,5 +1,11 @@
 # 变更记录
 
+## 0.5.1 - 2026-08-07
+
+- 按 `src/tests/scripts/configs/docs/systemd` 规范重组独立仓库，运行入口统一为 Python package 和 runtime wrapper。
+- 增加 shell/Python/单元测试/脱敏扫描质量门禁，systemd 不再依赖根目录脚本路径。
+- 重写 README，补充请求级降级、SSE 安全重试、无限续跑、多前端、本地通知、平台依赖和独立部署说明。
+
 ## 0.5.0 - 2026-08-05
 
 - 增加前台通道路由：WaveTerm、tmux/普通终端、虚拟员工 hook 可独立选择或自动选择。

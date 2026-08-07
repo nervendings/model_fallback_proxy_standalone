@@ -8,14 +8,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from foreground_channels import (
+from model_fallback_proxy.foreground_channels import (
     CHANNEL_TERMINAL,
     CHANNEL_VIRTUAL_EMPLOYEE,
     ControlledPtyTransport,
     MultiFrontendAdapter,
     VirtualEmployeeHookTransport,
 )
-from waveterm_foreground import PAYLOAD, WaveTermCandidate
+from model_fallback_proxy.waveterm_foreground import PAYLOAD, WaveTermCandidate
 
 
 class ForegroundChannelTests(unittest.TestCase):
@@ -40,8 +40,8 @@ class ForegroundChannelTests(unittest.TestCase):
                 "/proc/42/fd/0": "/dev/pts/9",
                 "/proc/42/cwd": "/tmp/work",
             }
-            with patch("foreground_channels._read_starttime", return_value="12345"), patch(
-                "foreground_channels._read_cmdline", return_value="codex 00000000-0000-4000-8000-000000000002"
+            with patch("model_fallback_proxy.foreground_channels._read_starttime", return_value="12345"), patch(
+                "model_fallback_proxy.foreground_channels._read_cmdline", return_value="codex 00000000-0000-4000-8000-000000000002"
             ), patch("os.readlink", side_effect=lambda path: links[str(path)]):
                 encoded = base64.b64encode(PAYLOAD.encode()).decode()
                 self.assertTrue(transport.controller_input("", encoded, candidate=candidate))
@@ -52,7 +52,7 @@ class ForegroundChannelTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             transport = ControlledPtyTransport(root, direct_enabled=True, writer=lambda _target, data: writes.append(data) or True)
             candidate = self._candidate()
-            with patch("foreground_channels._read_starttime", return_value="different"):
+            with patch("model_fallback_proxy.foreground_channels._read_starttime", return_value="different"):
                 encoded = base64.b64encode(PAYLOAD.encode()).decode()
                 self.assertFalse(transport.controller_input("", encoded, candidate=candidate))
             self.assertEqual(writes, [])
@@ -72,10 +72,10 @@ class ForegroundChannelTests(unittest.TestCase):
                 injected.append(bytes(value))
                 return 0
 
-            with patch("foreground_channels._read_starttime", return_value="12345"), patch(
-                "foreground_channels._read_cmdline", return_value="codex 00000000-0000-4000-8000-000000000002"
+            with patch("model_fallback_proxy.foreground_channels._read_starttime", return_value="12345"), patch(
+                "model_fallback_proxy.foreground_channels._read_cmdline", return_value="codex 00000000-0000-4000-8000-000000000002"
             ), patch("os.readlink", side_effect=lambda path: links[str(path)]), patch(
-                "foreground_channels.fcntl.ioctl", side_effect=ioctl
+                "model_fallback_proxy.foreground_channels.fcntl.ioctl", side_effect=ioctl
             ), patch("os.open", return_value=11), patch("os.close"):
                 encoded = base64.b64encode(PAYLOAD.encode()).decode()
                 self.assertTrue(transport.controller_input("", encoded, candidate=candidate))
@@ -91,8 +91,8 @@ class ForegroundChannelTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             transport = ControlledPtyTransport(root, direct_enabled=False, runner=runner)
             candidate = self._candidate(tmux_target="%7")
-            with patch("foreground_channels._read_starttime", return_value="12345"), patch(
-                "foreground_channels._read_cmdline", return_value="codex 00000000-0000-4000-8000-000000000002"
+            with patch("model_fallback_proxy.foreground_channels._read_starttime", return_value="12345"), patch(
+                "model_fallback_proxy.foreground_channels._read_cmdline", return_value="codex 00000000-0000-4000-8000-000000000002"
             ), patch("os.readlink", side_effect={"/proc/42/fd/0": "/dev/pts/9", "/proc/42/cwd": "/tmp/work"}.get):
                 encoded = base64.b64encode(PAYLOAD.encode()).decode()
                 self.assertTrue(transport.controller_input("", encoded, candidate=candidate))
@@ -133,9 +133,9 @@ class ForegroundChannelTests(unittest.TestCase):
         adapter = MultiFrontendAdapter(channel="terminal", observe_only=False, terminal_direct=True)
         adapter.transport.terminal.writer = lambda _target, data: writes.append(data) or True
         with patch.object(adapter, "discover_candidates", return_value=[candidate]), patch(
-            "foreground_channels._read_starttime", return_value="12345"
+            "model_fallback_proxy.foreground_channels._read_starttime", return_value="12345"
         ), patch(
-            "foreground_channels._read_cmdline", return_value="codex 00000000-0000-4000-8000-000000000002"
+            "model_fallback_proxy.foreground_channels._read_cmdline", return_value="codex 00000000-0000-4000-8000-000000000002"
         ), patch(
             "os.readlink", side_effect={"/proc/42/fd/0": "/dev/pts/9", "/proc/42/cwd": "/tmp/work"}.get
         ):

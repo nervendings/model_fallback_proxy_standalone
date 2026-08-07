@@ -1,7 +1,9 @@
 # Local environment and credentials
 .env
 .env.*
-!.env.example
+configs/*local*
+configs/*secret*
+configs/*.env
 *.local
 *.secret
 *.pem
@@ -23,6 +25,10 @@ logs/
 
 # Local planning and editor files
 work_plans/
+outputs/
+dist/
+build/
+*.egg-info/
 .idea/
 .vscode/
 .DS_Store

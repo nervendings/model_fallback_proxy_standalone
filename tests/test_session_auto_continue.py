@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-from session_auto_continue import SessionAutoContinue
+from model_fallback_proxy.session_auto_continue import SessionAutoContinue
 
 
 SESSION_ID = "00000000-0000-4000-8000-000000000001"
@@ -443,8 +443,8 @@ class SessionAutoContinueTest(unittest.TestCase):
 
     def test_local_notification_uses_notify_send_without_feishu_cli(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
-            with patch("session_auto_continue.shutil.which", return_value="/usr/bin/notify-send") as which_mock:
-                with patch("session_auto_continue.subprocess.run") as run_mock:
+            with patch("model_fallback_proxy.session_auto_continue.shutil.which", return_value="/usr/bin/notify-send") as which_mock:
+                with patch("model_fallback_proxy.session_auto_continue.subprocess.run") as run_mock:
                     run_mock.return_value.returncode = 0
                     watcher = SessionAutoContinue(
                         state_path=Path(temporary_dir) / "state.json",
@@ -480,8 +480,8 @@ class SessionAutoContinueTest(unittest.TestCase):
                 notification_channel="local",
                 notify_bin="notify-send",
             )
-            with patch("session_auto_continue.shutil.which", return_value=None), patch(
-                "session_auto_continue.subprocess.run"
+            with patch("model_fallback_proxy.session_auto_continue.shutil.which", return_value=None), patch(
+                "model_fallback_proxy.session_auto_continue.subprocess.run"
             ) as run_mock:
                 watcher.sendLocalNotification({"triggers": [{"session_id": SESSION_ID, "turn_id": "t"}]})
             run_mock.assert_not_called()
@@ -503,8 +503,8 @@ class SessionAutoContinueTest(unittest.TestCase):
     def test_feishu_notification_command_uses_configured_target(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)
-            with patch("session_auto_continue.shutil.which", return_value="/usr/bin/lark-cli") as which_mock:
-                with patch("session_auto_continue.subprocess.run") as run_mock:
+            with patch("model_fallback_proxy.session_auto_continue.shutil.which", return_value="/usr/bin/lark-cli") as which_mock:
+                with patch("model_fallback_proxy.session_auto_continue.subprocess.run") as run_mock:
                     run_mock.return_value.returncode = 0
                     watcher = SessionAutoContinue(
                         state_path=root / "state.json",

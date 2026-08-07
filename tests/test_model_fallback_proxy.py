@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from aiohttp import ClientSession, web
 
-from model_fallback_proxy import (
+from model_fallback_proxy.model_fallback_proxy import (
     DEFAULT_MODEL_CHAIN,
     buildAttemptPayload,
     createApp,
@@ -69,7 +69,7 @@ class ModelFallbackProxyTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(DEFAULT_MODEL_CHAIN, MODEL_CHAIN)
 
     def test_upstream_url_requires_explicit_safe_environment_value(self) -> None:
-        from model_fallback_proxy import readUpstreamUrl
+        from model_fallback_proxy.model_fallback_proxy import readUpstreamUrl
 
         with patch.dict(os.environ, {"CODEX_FALLBACK_UPSTREAM_URL": ""}):
             with self.assertRaises(RuntimeError):

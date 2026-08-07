@@ -4,7 +4,10 @@ After=network-online.target codex-model-fallback-proxy.service
 
 [Service]
 Type=simple
-WorkingDirectory=%h
+WorkingDirectory=%h/model_fallback_proxy_standalone
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONPATH=%h/model_fallback_proxy_standalone/src
 Environment=CODEX_AUTO_CONTINUE_FOREGROUND=1
 Environment=CODEX_AUTO_CONTINUE_BACKGROUND_FALLBACK=1
 Environment=CODEX_AUTO_CONTINUE_FRONTEND_CHANNEL=auto
@@ -14,7 +17,7 @@ Environment=CODEX_AUTO_CONTINUE_LINUX_NOTIFY=1
 Environment=CODEX_AUTO_CONTINUE_NOTIFY_BIN=notify-send
 Environment=CODEX_AUTO_CONTINUE_NOTIFY_INTERVAL=600
 EnvironmentFile=-%h/.config/codex-model-fallback-proxy-standalone/environment
-ExecStart=%h/model_fallback_proxy_standalone/.venv/bin/python %h/model_fallback_proxy_standalone/session_auto_continue.py
+ExecStart=%h/model_fallback_proxy_standalone/scripts/runtime/run_watcher.sh
 Restart=always
 RestartSec=3
 TimeoutStopSec=20
