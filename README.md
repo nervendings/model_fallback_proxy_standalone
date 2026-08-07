@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/logo.svg" alt="继续工程师 JXG" width="160">
+</p>
+
 # 继续工程师（JXG）
 
 Continue Engineer：容量不够？继续工程师说：继续。
