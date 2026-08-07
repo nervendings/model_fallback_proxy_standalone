@@ -1,4 +1,6 @@
-# Codex 模型故障转移与自动续跑工具
+# 继续工程师（JXG）
+
+Continue Engineer：容量不够？继续工程师说：继续。
 
 这是一个可独立复制、独立运行的 Linux 工具，为 Codex 前台会话提供请求级故障转移、失败自动重试、前台可见续跑和本地通知。它不要求 WaveTerm，也不要求飞书；两者只是可选的前端或通知通道。
 
@@ -14,6 +16,20 @@
 - **本地通知**：成功触发续跑进入汇总队列，默认每 600 秒用 Linux `notify-send` 发一条摘要；无桌面或没有 `notify-send` 时只记录日志，不影响重试。
 - **可选飞书通知**：仅当显式选择 `feishu` 并提供 chat id 时调用 `lark-cli`，飞书不是安装或运行依赖。
 - **审计与恢复**：状态、事件、前台发现结果和日志写入用户状态目录，支持查看失败原因、触发方式、模型和退避信息。
+
+## 运行效果
+
+容量不足时，前台仍保留可见的 `继续` 输入，效果与用户手动操作一致：
+
+![普通终端容量提示与自动继续](docs/assets/effect-terminal-capacity.png)
+
+本地 Linux 通知按 10 分钟汇总成功触发记录，避免高频弹窗：
+
+![Linux 本地通知汇总](docs/assets/effect-local-summary.png)
+
+也可以显式切换为飞书通知；飞书只负责展示结果，不参与核心重试链路：
+
+![飞书通知效果](docs/assets/effect-feishu-notification.jpg)
 
 ## 实现方案
 
@@ -168,4 +184,4 @@ CODEX_AUTO_CONTINUE_BACKGROUND_FALLBACK=0 \
 
 ## 迁移和贡献
 
-从旧版后台续跑迁移请阅读 `docs/migration.md`。提交前必须通过 `scripts/quality/check_repo_quality.sh`，不要提交 `.env`、`.venv`、状态目录、日志或本地计划文件。
+从旧版后台续跑迁移请阅读 `docs/migration.md`。贡献规则见 `CONTRIBUTING.md`：`main` 仅接受 Pull Request，禁止直接推送；提交前必须通过 `scripts/quality/check_repo_quality.sh`。不要提交 `.env`、`.venv`、状态目录、日志或本地计划文件。

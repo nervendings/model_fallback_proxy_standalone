@@ -1,5 +1,5 @@
 [Unit]
-Description=Codex TUI automatic continuation watcher
+Description=Continue Engineer automatic continuation watcher
 After=network-online.target codex-model-fallback-proxy.service
 
 [Service]

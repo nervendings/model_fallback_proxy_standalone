@@ -1,5 +1,9 @@
 # 变更记录
 
+## 项目名称
+
+**继续工程师（JXG / Continue Engineer）**：容量不够自动换档，失败自动重试，前台自动续上。
+
 ## 0.5.1 - 2026-08-07
 
 - 按 `src/tests/scripts/configs/docs/systemd` 规范重组独立仓库，运行入口统一为 Python package 和 runtime wrapper。
