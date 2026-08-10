@@ -127,8 +127,10 @@ def getNextModel(model: str) -> str:
     return current_model
 
 
-def getReasoningEffort(_file_state: dict[str, Any]) -> str:
-    return DEFAULT_REASONING_EFFORT
+def getReasoningEffort(file_state: dict[str, Any]) -> str:
+    """沿用会话实际档位；历史事件缺失时才使用默认档位。"""
+    effort = str(file_state.get("reasoning_effort") or "").strip()
+    return effort or DEFAULT_REASONING_EFFORT
 
 
 def isEnabled(value: str | None) -> bool:

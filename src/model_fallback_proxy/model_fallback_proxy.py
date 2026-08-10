@@ -106,7 +106,9 @@ def isCapacityHttpResponse(status_code: int, raw_body: bytes, headers: Any | Non
             return True
         payload = parseJsonBody(raw_body)
         if not isinstance(payload, dict):
-            return False
+            # 少数兼容层以 200 + text/plain 返回容量提示，正文不是 JSON。
+            # 该提示只在尚未向下游输出时出现，可以安全重试下一模型。
+            return True
         if isinstance(payload.get("error"), (dict, str)):
             return True
         message = payload.get("message")
@@ -142,11 +144,17 @@ def buildAttemptPayload(payload: dict[str, Any], model_name: str) -> dict[str, A
     reasoning = payload.get("reasoning")
     if isinstance(reasoning, dict):
         attempt_reasoning = dict(reasoning)
-        effort = str(attempt_reasoning.get("effort") or "")
+        effort = str(attempt_reasoning.get("effort") or "").strip().lower()
         effort_rewrites = MODEL_REASONING_EFFORT_REWRITES.get(model_name, {})
         if effort in effort_rewrites:
             attempt_reasoning["effort"] = effort_rewrites[effort]
         attempt_payload["reasoning"] = attempt_reasoning
+    # 兼容部分 OpenAI-compatible 客户端把思考档位放在顶层。
+    if isinstance(payload.get("reasoning_effort"), str):
+        effort = payload["reasoning_effort"].strip().lower()
+        effort_rewrites = MODEL_REASONING_EFFORT_REWRITES.get(model_name, {})
+        if effort in effort_rewrites:
+            attempt_payload["reasoning_effort"] = effort_rewrites[effort]
     return attempt_payload
 
 
@@ -211,12 +219,10 @@ def isCapacitySseEvent(raw_event: bytes) -> bool:
         return isCapacityText(raw_event)
     if event_type:
         return False
-    # 部分中转会把失败 JSON 放进 text/event-stream，但不带 event/type 字段。
-    # 只有同时出现容量标记和错误字段时才判定，避免把正常输出文本误判为失败。
+    # 部分中转会把失败文本或 JSON 放进 text/event-stream，但不带 event/type 字段。
+    # 结构化的正常输出有明确事件类型，不会走到这里；无类型容量提示应直接重试。
     text_value = raw_event.decode("utf-8", "ignore").lower()
-    return isCapacityText(text_value) and any(
-        marker in text_value for marker in ("error", "codex_error_info", "server_overloaded")
-    )
+    return isCapacityText(text_value)
 
 
 def isSseResponse(headers: Any) -> bool:

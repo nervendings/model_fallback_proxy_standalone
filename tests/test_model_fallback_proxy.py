@@ -81,6 +81,43 @@ class ModelFallbackProxyTest(unittest.IsolatedAsyncioTestCase):
         body = b'{"message":"Selected model is at capacity. Please try a different model."}'
         self.assertTrue(isCapacityHttpResponse(200, body))
 
+    def test_plain_text_capacity_response_is_retryable(self) -> None:
+        body = b"Selected model is at capacity. Please try a different model."
+        self.assertTrue(isCapacityHttpResponse(200, body, {"Content-Type": "text/plain"}))
+
+    async def test_plain_text_capacity_falls_through_model_chain(self) -> None:
+        attempted_models: list[str] = []
+
+        async def upstreamHandler(request: web.Request) -> web.Response:
+            payload = await request.json()
+            model_name = str(payload["model"])
+            attempted_models.append(model_name)
+            if model_name == "gpt-5.6-sol":
+                return web.Response(
+                    text="Selected model is at capacity. Please try a different model.",
+                    content_type="text/plain",
+                )
+            return web.json_response({"model": model_name, "output": "OK"})
+
+        upstream_app = web.Application()
+        upstream_app.router.add_post("/responses", upstreamHandler)
+        async with RunningApp(upstream_app) as upstream:
+            proxy_app = createApp(upstream.url, MODEL_CHAIN, cooldown_seconds=30)
+            async with RunningApp(proxy_app) as proxy:
+                async with ClientSession() as session:
+                    response = await session.post(
+                        proxy.url + "/responses",
+                        json={"model": "gpt-5.6-sol", "reasoning": {"effort": "ultra"}},
+                    )
+                    body = await response.json()
+                    status = await (await session.get(proxy.url + "/_fallback/status")).json()
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(attempted_models, ["gpt-5.6-sol", "gpt-5.6-terra"])
+        self.assertEqual(body["model"], "gpt-5.6-terra")
+        self.assertEqual(status["fallback_count"], 1)
+        self.assertEqual(status["capacity_count"], 1)
+
     def test_sse_event_classification(self) -> None:
         created = b'event: response.created\ndata: {"type":"response.created"}\n\n'
         output = b'event: response.output_text.delta\ndata: {"type":"response.output_text.delta"}\n\n'
@@ -90,6 +127,8 @@ class ModelFallbackProxyTest(unittest.IsolatedAsyncioTestCase):
 
         raw_error = b'data: {"error":{"code":"server_overloaded"}}\n\n'
         self.assertTrue(isCapacitySseEvent(raw_error))
+        raw_text_error = b"data: Selected model is at capacity. Please try a different model.\n\n"
+        self.assertTrue(isCapacitySseEvent(raw_text_error))
 
     def test_capacity_text_in_normal_output_is_not_an_error(self) -> None:
         normal_http = b'{"output_text":"Selected model is at capacity"}'
@@ -99,6 +138,12 @@ class ModelFallbackProxyTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(isCapacityHttpResponse(200, normal_http))
         self.assertFalse(isCapacitySseEvent(normal_sse))
+
+    def test_top_level_reasoning_effort_rewrite_is_supported(self) -> None:
+        payload = {"model": "gpt-5.6-sol", "reasoning_effort": "ultra"}
+        luna_payload = buildAttemptPayload(payload, "gpt-5.6-luna")
+        self.assertEqual(luna_payload["reasoning_effort"], "max")
+        self.assertEqual(payload["reasoning_effort"], "ultra")
 
     def test_luna_rewrites_unsupported_ultra_effort(self) -> None:
         payload = {"model": "gpt-5.6-sol", "reasoning": {"effort": "ultra", "summary": "auto"}}
