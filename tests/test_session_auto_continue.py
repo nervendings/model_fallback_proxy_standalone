@@ -99,8 +99,8 @@ class SessionAutoContinueTest(unittest.TestCase):
         watcher.bootstrap()
         return watcher
 
-    def appendMetadata(self, path: Path) -> None:
-        writeEvent(path, {"type": "session_meta", "session_id": SESSION_ID, "originator": "codex-tui", "cwd": "/tmp"})
+    def appendMetadata(self, path: Path, originator: str = "codex-tui") -> None:
+        writeEvent(path, {"type": "session_meta", "session_id": SESSION_ID, "originator": originator, "cwd": "/tmp"})
         writeEvent(path, {"type": "thread_settings_applied", "thread_settings": {"model": "gpt-5.6-sol", "cwd": "/tmp", "reasoning_effort": "xhigh"}})
         writeEvent(
             path,
@@ -279,7 +279,7 @@ class SessionAutoContinueTest(unittest.TestCase):
             self.assertEqual(len(commands), 5)
             self.assertEqual(watcher.state["sessions"][SESSION_ID]["last_action"], "background_continued")
 
-    def test_capacity_downgrade_uses_resume_instead_of_original_foreground(self) -> None:
+    def test_capacity_downgrade_uses_foreground_without_background_resume(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)
             session_root = root / "sessions"
@@ -300,9 +300,46 @@ class SessionAutoContinueTest(unittest.TestCase):
                 error={"message": "Selected model is at capacity", "codex_error_info": "server_overloaded"},
             )
             watcher.scan()
-            self.assertEqual(len(commands), 1)
-            self.assertIn("gpt-5.6-terra", commands[0].command)
-            self.assertEqual(requests, [])
+            self.assertEqual(commands, [])
+            self.assertEqual(requests[0]["model"], "gpt-5.6-terra")
+            self.assertEqual(watcher.state["sessions"][SESSION_ID]["last_action"], "foreground_continued")
+
+    def test_foreground_not_ready_retries_without_background_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            session_root = root / "sessions"
+            session_root.mkdir()
+            session_file = session_root / "session.jsonl"
+            session_file.touch()
+            commands: list[FakeProcess] = []
+            requests: list[dict[str, Any]] = []
+            clock = [100.0]
+
+            def foreground_adapter(request: dict[str, Any]) -> dict[str, Any]:
+                requests.append(request)
+                if len(requests) == 1:
+                    return {"status": "observe_only", "reason": "prompt_not_ready"}
+                return {"status": "injected", "block_id": "block-1"}
+
+            watcher = self.makeWatcher(
+                root,
+                commands,
+                foreground_adapter=foreground_adapter,
+                time_fn=lambda: clock[0],
+            )
+            self.appendMetadata(session_file)
+            self.appendFailure(session_file, "turn-foreground-wait")
+            watcher.scan()
+            self.assertEqual(commands, [])
+            self.assertEqual(watcher.state["sessions"][SESSION_ID]["last_action"], "foreground_retry_pending")
+            self.assertEqual(watcher.state["pending_failures"][0]["mode"], "foreground")
+
+            clock[0] += 2.0
+            watcher.scan()
+            self.assertEqual(commands, [])
+            self.assertEqual(len(requests), 2)
+            self.assertEqual(watcher.state["pending_failures"], [])
+            self.assertEqual(watcher.state["sessions"][SESSION_ID]["last_action"], "foreground_continued")
 
     def test_luna_capacity_failure_requests_force_continue(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
@@ -454,7 +491,7 @@ class SessionAutoContinueTest(unittest.TestCase):
                 feishu_notify=True,
                 notification_sender=notifications.append,
             )
-            self.appendMetadata(session_file)
+            self.appendMetadata(session_file, originator="codex_exec")
             self.appendFailure(session_file, "turn-background-notify")
             watcher.scan()
             self.assertEqual(len(commands), 1)
@@ -642,7 +679,7 @@ class SessionAutoContinueTest(unittest.TestCase):
                 commands,
                 foreground_adapter=lambda _request: {"status": "failed", "reason": "transport_failed"},
             )
-            self.appendMetadata(session_file)
+            self.appendMetadata(session_file, originator="codex_exec")
             self.appendFailure(session_file, "turn-fallback")
             watcher.scan()
             self.assertEqual(len(commands), 1)

@@ -17,7 +17,7 @@
 - **请求级容量降级**：代理转发 HTTP 和 SSE 请求；上游返回容量错误、`429`、`503` 或 `529` 且尚未产生有效输出时，自动按模型链重试。
 - **SSE 安全处理**：只在响应尚未向下游输出有效正文时切换模型；已有正文或工具输出后不重放，避免重复执行工具和副作用。
 - **失败自动重试**：watcher 读取 Codex session JSONL，识别非手动失败并自动继续；不设置停止上限。单会话 30 秒内连续成功发送 3 次“继续”后，延迟 30 秒再自动恢复，其它会话不受影响。
-- **前台可见续跑**：优先向当前 Codex 前端发送固定输入 `继续\r`，用户看到的效果与手动输入一致；无法安全定位前台目标时才使用可控的后台 `codex exec resume` 兜底。
+- **前台可见续跑**：向当前 Codex 前端发送固定输入 `继续\r`，用户看到的效果与手动输入一致；目标暂未就绪时按退避队列重试，不抢占原线程。后台 `codex exec resume` 只作为非交互会话的显式兜底。
 - **多前端支持**：WaveTerm 原生 socket、普通终端 tmux pane、显式虚拟员工 hook，以及受严格开关保护的裸 PTY。`auto` 模式按唯一目标选择通道。
 - **本地通知**：成功触发续跑进入汇总队列，默认每 600 秒用 Linux `notify-send` 发一条摘要；无桌面或没有 `notify-send` 时只记录日志，不影响重试。
 - **可选飞书通知**：仅当显式选择 `feishu` 并提供 chat id 时调用 `lark-cli`，飞书不是安装或运行依赖。
@@ -51,7 +51,7 @@ flowchart LR
     H -- 是 --> I[只记录不注入]
     H -- 否 --> J[WaveTerm / tmux / hook / 裸 PTY]
     J --> K[可见输入: 继续\r]
-    J --> L[目标不可用时后台 resume]
+    J --> L[非交互且显式开启时后台 resume]
     K --> M[本地通知汇总]
     L --> M
 ```
@@ -138,7 +138,7 @@ codex
 - `CODEX_FALLBACK_UPSTREAM_URL`：必填，上游 HTTP/S 地址，禁止内嵌 userinfo。
 - `CODEX_FALLBACK_MODEL_CHAIN`：模型链，默认 sol、terra、luna。
 - `CODEX_AUTO_CONTINUE_FOREGROUND`：是否允许前台可见输入。
-- `CODEX_AUTO_CONTINUE_BACKGROUND_FALLBACK`：前台目标不可用时是否允许后台 resume 兜底。
+- `CODEX_AUTO_CONTINUE_BACKGROUND_FALLBACK`：是否允许非交互会话后台 resume 兜底，默认 `0`；Codex TUI 不建议开启。
 - `CODEX_AUTO_CONTINUE_FRONTEND_CHANNEL`：`auto`、`waveterm`、`terminal`、`virtual_employee`。
 - `CODEX_AUTO_CONTINUE_NOTIFICATION_CHANNEL`：`local`、`feishu` 或 `none`，默认 `local`。
 - `CODEX_AUTO_CONTINUE_NOTIFY_INTERVAL`：通知汇总窗口，默认 600 秒。

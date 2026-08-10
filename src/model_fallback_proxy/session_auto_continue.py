@@ -21,7 +21,7 @@ DEFAULT_EVENTS_PATH = Path.home() / ".local" / "state" / "codex-session-auto-con
 DEFAULT_CODEX_BIN = Path(shutil.which("codex") or "codex")
 DEFAULT_PROMPT = "继续"
 DEFAULT_REASONING_EFFORT = "xhigh"
-DEFAULT_BACKGROUND_FALLBACK = True
+DEFAULT_BACKGROUND_FALLBACK = False
 DEFAULT_NOTIFICATION_CHANNEL = "local"
 DEFAULT_LINUX_NOTIFY = True
 DEFAULT_NOTIFY_BIN = Path("notify-send")
@@ -42,6 +42,14 @@ MAX_HANDLED_TURNS = 64
 CONTINUE_BURST_WINDOW_SECONDS = 30.0
 CONTINUE_BURST_LIMIT = 3
 CONTINUE_PAUSE_SECONDS = 30.0
+FOREGROUND_RETRY_DELAYS_SECONDS = (2.0, 5.0, 10.0, 30.0, 60.0)
+FOREGROUND_RETRYABLE_REASONS = {
+    "target_not_unique",
+    "prompt_not_ready",
+    "prompt_not_stable",
+    "transport_failed",
+    "retry_deferred",
+}
 # codex_exec 是 RoadClaw/虚拟员工常用入口；未配置虚拟员工 hook 时仍只观察。
 WATCHED_ORIGINATORS = {"codex-tui", "codex_exec", "virtual_employee", "roadclaw"}
 MODEL_CHAIN = (
@@ -291,8 +299,16 @@ class SessionAutoContinue:
 
     def migrateToForegroundOnly(self) -> None:
         """清除旧后台续跑状态，避免迁移后旧 PID 阻塞前台交互。"""
-        changed = bool(self.state.get("pending_failures"))
-        self.state["pending_failures"] = []
+        pending = self.state.get("pending_failures")
+        if not isinstance(pending, list):
+            pending = []
+        foreground_pending = [
+            item
+            for item in pending
+            if isinstance(item, dict) and str(item.get("mode") or "") == "foreground"
+        ]
+        changed = len(foreground_pending) != len(pending)
+        self.state["pending_failures"] = foreground_pending
         for session in self.state.get("sessions", {}).values():
             if not isinstance(session, dict):
                 continue
@@ -846,6 +862,14 @@ class SessionAutoContinue:
             if not_before > now:
                 remaining.append(item)
                 continue
+            if str(item.get("mode") or "") == "foreground":
+                if self.isSessionActive(session_id):
+                    remaining.append(item)
+                    continue
+                _completed, retry_item = self.retryForegroundFailure(item, now)
+                if retry_item is not None:
+                    remaining.append(retry_item)
+                continue
             if self.isSessionActive(session_id):
                 remaining.append(item)
                 continue
@@ -856,6 +880,7 @@ class SessionAutoContinue:
                 "reasoning_effort": str(item.get("reasoning_effort") or "").strip(),
                 "cwd": str(item.get("cwd") or Path.home()),
                 "frontend_channel": str(item.get("frontend_channel") or ""),
+                "originator": str(item.get("originator") or ""),
             }
             if isinstance(item.get("virtual_employee"), dict):
                 file_state["virtual_employee"] = dict(item["virtual_employee"])
@@ -869,6 +894,8 @@ class SessionAutoContinue:
         file_state: dict[str, Any],
         payload: dict[str, Any],
         not_before: float | None = None,
+        mode: str = "background",
+        retry_count: int = 0,
     ) -> None:
         session_id = str(file_state.get("session_id") or "").strip()
         turn_id = str(payload.get("turn_id") or "").strip()
@@ -889,12 +916,97 @@ class SessionAutoContinue:
             "reasoning_effort": file_state.get("reasoning_effort"),
             "cwd": file_state.get("cwd"),
             "frontend_channel": file_state.get("frontend_channel"),
+            "originator": file_state.get("originator"),
             "virtual_employee": file_state.get("virtual_employee"),
             "payload": payload,
         }
+        if mode != "background":
+            item["mode"] = mode
+        if retry_count:
+            item["retry_count"] = int(retry_count)
         if not_before is not None:
             item["not_before"] = float(not_before)
         pending.append(item)
+
+    @staticmethod
+    def isInteractiveSession(file_state: dict[str, Any]) -> bool:
+        """仅把 Codex TUI 前台会话交给可见输入通道，避免后台抢占线程。"""
+        originator = str(file_state.get("originator") or "").strip().lower()
+        channel = str(file_state.get("frontend_channel") or "").strip().lower()
+        return originator == "codex-tui" or channel in {"auto", "waveterm", "terminal"}
+
+    def shouldRetryForeground(
+        self,
+        file_state: dict[str, Any],
+        foreground_result: dict[str, Any],
+    ) -> bool:
+        if not self.isInteractiveSession(file_state):
+            return False
+        status = str(foreground_result.get("status") or "").strip().lower()
+        reason = str(foreground_result.get("reason") or "").strip().lower()
+        return status in {"observe_only", "failed"} and reason in FOREGROUND_RETRYABLE_REASONS
+
+    def retryForegroundFailure(
+        self,
+        item: dict[str, Any],
+        now: float,
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """重试前台注入；目标仍在工作时只延迟，不创建隐藏 resume。"""
+        session_id = str(item.get("session_id") or "").strip()
+        turn_id = str(item.get("turn_id") or "").strip()
+        payload = item.get("payload")
+        if not session_id or not turn_id or not isinstance(payload, dict):
+            return False, None
+        file_state = {
+            "session_id": session_id,
+            "watch": True,
+            "originator": str(item.get("originator") or "codex-tui"),
+            "model": str(item.get("model") or MODEL_CHAIN[0]),
+            "reasoning_effort": str(item.get("reasoning_effort") or "").strip(),
+            "cwd": str(item.get("cwd") or Path.home()),
+            "frontend_channel": str(item.get("frontend_channel") or "auto"),
+        }
+        if isinstance(item.get("virtual_employee"), dict):
+            file_state["virtual_employee"] = dict(item["virtual_employee"])
+        result = self.tryForegroundResume(
+            session_id,
+            turn_id,
+            file_state,
+            payload,
+            str(file_state["model"]),
+            str(file_state["reasoning_effort"]),
+        )
+        session = self.getSessionState(session_id)
+        session["foreground"] = result
+        status = str(result.get("status") or "").strip().lower()
+        if status in {"injected", "confirmed"}:
+            session["last_action"] = "foreground_continued"
+            self.emitNotice(session_id, turn_id, f"前台适配器已发送“继续”（{status}）。", "info")
+            self.notifySuccess(session_id, turn_id, str(file_state["model"]), "foreground")
+            return True, None
+        reason = str(result.get("reason") or "").strip().lower()
+        if reason not in FOREGROUND_RETRYABLE_REASONS:
+            session["last_action"] = "foreground_" + (status or "unavailable")
+            self.emitNotice(
+                session_id,
+                turn_id,
+                f"前台适配器未注入（{reason or status or 'unknown'}），保留人工接管。",
+                "warning",
+            )
+            return False, None
+        retry_count = int(item.get("retry_count") or 0) + 1
+        delay_index = min(retry_count - 1, len(FOREGROUND_RETRY_DELAYS_SECONDS) - 1)
+        item["retry_count"] = retry_count
+        item["not_before"] = now + FOREGROUND_RETRY_DELAYS_SECONDS[delay_index]
+        session["last_action"] = "foreground_retry_pending"
+        logging.info(
+            "auto-continue foreground retry pending session=%s turn=%s reason=%s retry=%d",
+            session_id,
+            turn_id,
+            reason or status or "unknown",
+            retry_count,
+        )
+        return False, item
 
     def handleFailure(self, file_state: dict[str, Any], payload: dict[str, Any], allow_pending: bool = True) -> None:
         session_id = str(file_state.get("session_id") or "").strip()
@@ -960,24 +1072,34 @@ class SessionAutoContinue:
             else:
                 notice_message = "检测到非手动失败，自动发送“继续”并持续重试。"
         session["last_model"] = resume_model
-        model_switch_required = bool(
-            capacity_failure
-            and current_model in MODEL_CHAIN
-            and resume_model != current_model
+        # 容量降级也必须先走当前前台。请求层代理负责把下一次请求切到候选模型，
+        # watcher 不再用隐藏 codex exec resume 抢占原线程。
+        foreground_result = self.tryForegroundResume(
+            session_id, turn_id, file_state, payload, resume_model, reasoning_effort
         )
-        if model_switch_required:
-            # 前台只支持输入“继续”，不能改变当前 TUI 模型；降级必须走带 -m 的 resume。
-            foreground_result = {"status": "observe_only", "reason": "model_switch_requires_resume"}
-        else:
-            foreground_result = self.tryForegroundResume(
-                session_id, turn_id, file_state, payload, resume_model, reasoning_effort
-            )
         foreground_status = str(foreground_result.get("status") or "").strip().lower()
         if foreground_status in {"injected", "confirmed"}:
             session["last_action"] = "foreground_continued"
             session["foreground"] = foreground_result
             self.emitNotice(session_id, turn_id, f"前台适配器已发送“继续”（{foreground_status}）。", "info")
             self.notifySuccess(session_id, turn_id, resume_model, "foreground")
+            return
+        if self.shouldRetryForeground(file_state, foreground_result):
+            reason = str(foreground_result.get("reason") or foreground_status or "unknown")
+            self.queuePendingFailure(
+                file_state,
+                payload,
+                not_before=now + FOREGROUND_RETRY_DELAYS_SECONDS[0],
+                mode="foreground",
+            )
+            session["last_action"] = "foreground_retry_pending"
+            session["foreground"] = foreground_result
+            self.emitNotice(
+                session_id,
+                turn_id,
+                f"前台暂未可输入（{reason}），已排队等待，不启动后台 resume。",
+                "warning",
+            )
             return
         fallback_allowed = self.allow_background_fallback and foreground_status in {"observe_only", "failed"}
         if not fallback_allowed:
