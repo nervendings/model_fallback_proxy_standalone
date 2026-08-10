@@ -11,6 +11,7 @@ from aiohttp import ClientSession, web
 
 from model_fallback_proxy.model_fallback_proxy import (
     DEFAULT_MODEL_CHAIN,
+    ProxyState,
     buildAttemptPayload,
     createApp,
     isCapacityHttpResponse,
@@ -67,6 +68,10 @@ class ModelFallbackProxyTest(unittest.IsolatedAsyncioTestCase):
 
     def test_default_model_chain_stops_at_luna(self) -> None:
         self.assertEqual(DEFAULT_MODEL_CHAIN, MODEL_CHAIN)
+
+    def test_non_gpt56_model_does_not_enter_fallback_chain(self) -> None:
+        state = ProxyState(("gpt-5.5", "gpt-5.6-luna"), cooldown_seconds=30)
+        self.assertEqual(state.buildCandidates("gpt-5.5"), ["gpt-5.5"])
 
     def test_upstream_url_requires_explicit_safe_environment_value(self) -> None:
         from model_fallback_proxy.model_fallback_proxy import readUpstreamUrl

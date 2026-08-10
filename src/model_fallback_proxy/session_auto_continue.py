@@ -57,7 +57,6 @@ MODEL_CHAIN = (
     "gpt-5.6-terra",
     "gpt-5.6-luna",
 )
-LEGACY_MODEL_ALIASES = {"gpt-5.5": "gpt-5.6-luna"}
 CAPACITY_MARKERS = (
     "selected model is at capacity",
     "model is at capacity",
@@ -114,10 +113,17 @@ def isFailureEvent(payload: dict[str, Any]) -> bool:
     return payload.get("type") == "task_complete" and bool(payload.get("error")) and not isManualTermination(payload.get("error"))
 
 
+def isGpt56Model(model: str) -> bool:
+    """只有 gpt-5.6 系列允许自动切换模型。"""
+    return str(model or "").strip().lower().startswith("gpt-5.6-")
+
+
 def getNextModel(model: str) -> str:
-    current_model = LEGACY_MODEL_ALIASES.get(str(model or "").strip(), str(model or "").strip())
+    current_model = str(model or "").strip()
     if not current_model:
         return MODEL_CHAIN[0]
+    if not isGpt56Model(current_model):
+        return current_model
     try:
         current_index = MODEL_CHAIN.index(current_model)
     except ValueError:
@@ -819,7 +825,8 @@ class SessionAutoContinue:
             "model": model,
             "reasoning_effort": reasoning_effort,
             "force_continue": bool(
-                isCapacityError(payload.get("error")) and model == MODEL_CHAIN[-1]
+                isCapacityError(payload.get("error"))
+                and (not isGpt56Model(model) or model == MODEL_CHAIN[-1])
             ),
         }
         if isinstance(file_state.get("virtual_employee"), dict):
@@ -1046,7 +1053,6 @@ class SessionAutoContinue:
         handled_turn_ids.append(turn_id)
         session["handled_turn_ids"] = handled_turn_ids[-MAX_HANDLED_TURNS:]
         current_model = str(file_state.get("model") or session.get("last_model") or MODEL_CHAIN[0]).strip() or MODEL_CHAIN[0]
-        current_model = LEGACY_MODEL_ALIASES.get(current_model, current_model)
         file_state["model"] = current_model
         reasoning_effort = getReasoningEffort(file_state)
         capacity_failure = isCapacityError(payload.get("error"))
@@ -1055,7 +1061,12 @@ class SessionAutoContinue:
         )
         resume_model = current_model
         # 容量错误先沿链路下探；到最低档后继续重试，同时只保留有限历史。
-        if capacity_failure and current_model in MODEL_CHAIN and current_model != MODEL_CHAIN[-1]:
+        if (
+            capacity_failure
+            and isGpt56Model(current_model)
+            and current_model in MODEL_CHAIN
+            and current_model != MODEL_CHAIN[-1]
+        ):
             resume_model = getNextModel(current_model)
             file_state["model"] = resume_model
             session["last_failure_kind"] = "capacity"

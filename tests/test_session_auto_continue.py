@@ -99,18 +99,24 @@ class SessionAutoContinueTest(unittest.TestCase):
         watcher.bootstrap()
         return watcher
 
-    def appendMetadata(self, path: Path, originator: str = "codex-tui", effort: str = "xhigh") -> None:
+    def appendMetadata(
+        self,
+        path: Path,
+        originator: str = "codex-tui",
+        effort: str = "xhigh",
+        model: str = "gpt-5.6-sol",
+    ) -> None:
         writeEvent(path, {"type": "session_meta", "session_id": SESSION_ID, "originator": originator, "cwd": "/tmp"})
-        writeEvent(path, {"type": "thread_settings_applied", "thread_settings": {"model": "gpt-5.6-sol", "cwd": "/tmp", "reasoning_effort": effort}})
+        writeEvent(path, {"type": "thread_settings_applied", "thread_settings": {"model": model, "cwd": "/tmp", "reasoning_effort": effort}})
         writeEvent(
             path,
             {
                 "type": "turn_context",
                 "turn_id": "turn-context",
                 "cwd": "/tmp",
-                "model": "gpt-5.6-sol",
+                "model": model,
                 "effort": effort,
-                "collaboration_mode": {"settings": {"model": "gpt-5.6-sol", "reasoning_effort": effort}},
+                "collaboration_mode": {"settings": {"model": model, "reasoning_effort": effort}},
             },
         )
 
@@ -323,6 +329,27 @@ class SessionAutoContinueTest(unittest.TestCase):
             self.assertEqual(len(commands), 1)
             self.assertIn("gpt-5.6-terra", commands[0].command)
             self.assertIn('model_reasoning_effort="ultra"', commands[0].command)
+
+    def test_non_gpt56_capacity_only_continues_same_model(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            session_root = root / "sessions"
+            session_root.mkdir()
+            session_file = session_root / "session.jsonl"
+            session_file.touch()
+            commands: list[FakeProcess] = []
+            watcher = self.makeWatcher(root, commands)
+            self.appendMetadata(session_file, model="gpt-5.5")
+            self.appendFailure(
+                session_file,
+                "turn-gpt55-capacity",
+                error={"message": "Selected model is at capacity", "codex_error_info": "server_overloaded"},
+            )
+            watcher.scan()
+            self.assertEqual(len(commands), 1)
+            self.assertIn("gpt-5.5", commands[0].command)
+            self.assertNotIn("gpt-5.6-terra", commands[0].command)
+            self.assertNotIn("gpt-5.6-luna", commands[0].command)
 
     def test_foreground_not_ready_retries_without_background_resume(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:

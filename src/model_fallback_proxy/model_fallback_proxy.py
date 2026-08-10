@@ -64,6 +64,11 @@ MODEL_REASONING_EFFORT_REWRITES = {
 }
 
 
+def isGpt56Model(model_name: str) -> bool:
+    """只有 gpt-5.6 系列允许进入本项目的自动降级链。"""
+    return str(model_name or "").strip().lower().startswith("gpt-5.6-")
+
+
 def readModelChain() -> tuple[str, ...]:
     raw_value = os.getenv("CODEX_FALLBACK_MODEL_CHAIN", "")
     values = tuple(item.strip() for item in raw_value.split(",") if item.strip())
@@ -240,7 +245,7 @@ class ProxyState:
     capacity_count: int = 0
 
     def buildCandidates(self, requested_model: str) -> list[str]:
-        if requested_model not in self.model_chain:
+        if not isGpt56Model(requested_model) or requested_model not in self.model_chain:
             return [requested_model]
         start_index = self.model_chain.index(requested_model)
         model_slice = list(self.model_chain[start_index:])
