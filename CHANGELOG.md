@@ -4,6 +4,11 @@
 
 **继续工程师（JXG / Continue Engineer）**：容量不够自动换档，失败自动重试，前台自动续上。
 
+## 0.5.5 - 2026-08-12
+
+- 识别 `stream disconnected before completion: An error occurred while processing your request` 服务端瞬时错误。
+- 该错误与其它可恢复容量错误统一进入自动换档和前台“继续”流程。
+
 ## 0.5.4 - 2026-08-12
 
 - 识别“stream disconnected before completion: Our servers are currently overloaded”及远程 compact 同类错误。

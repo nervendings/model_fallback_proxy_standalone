@@ -67,6 +67,12 @@ class ModelFallbackProxyTest(unittest.IsolatedAsyncioTestCase):
                 "Our servers are currently overloaded. Please try again later."
             )
         )
+        self.assertTrue(
+            isCapacityText(
+                "stream disconnected before completion: An error occurred while processing your request. "
+                "You can retry your request."
+            )
+        )
         self.assertFalse(isCapacityText("invalid API key"))
 
     def test_http_capacity_fallback_accepts_error_headers_and_empty_503(self) -> None:
@@ -106,6 +112,13 @@ class ModelFallbackProxyTest(unittest.IsolatedAsyncioTestCase):
         body = (
             b"Error running remote compact task: stream disconnected before completion: "
             b"Our servers are currently overloaded. Please try again later."
+        )
+        self.assertTrue(isCapacityHttpResponse(200, body, {"Content-Type": "text/plain"}))
+
+    def test_processing_error_response_is_retryable(self) -> None:
+        body = (
+            b"stream disconnected before completion: An error occurred while processing your request. "
+            b"You can retry your request, or contact us through our help center."
         )
         self.assertTrue(isCapacityHttpResponse(200, body, {"Content-Type": "text/plain"}))
 
@@ -158,6 +171,11 @@ class ModelFallbackProxyTest(unittest.IsolatedAsyncioTestCase):
             b"Please try again later.\n\n"
         )
         self.assertTrue(isCapacitySseEvent(raw_overloaded_error))
+        raw_processing_error = (
+            b"data: stream disconnected before completion: An error occurred while processing your request. "
+            b"You can retry your request.\n\n"
+        )
+        self.assertTrue(isCapacitySseEvent(raw_processing_error))
 
     def test_capacity_text_in_normal_output_is_not_an_error(self) -> None:
         normal_http = b'{"output_text":"Selected model is at capacity"}'

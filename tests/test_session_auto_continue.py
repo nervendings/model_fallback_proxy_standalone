@@ -267,6 +267,22 @@ class SessionAutoContinueTest(unittest.TestCase):
             self.assertIn("gpt-5.6-luna", commands[1].command)
 
             self.appendTurnContext(session_file, "gpt-5.6-luna")
+            self.appendFailure(
+                session_file,
+                "turn-processing-error",
+                error={
+                    "message": (
+                        "stream disconnected before completion: An error occurred while processing your request. "
+                        "You can retry your request, or contact us through our help center."
+                    ),
+                    "codex_error_info": "other",
+                },
+            )
+            watcher.scan()
+            self.assertEqual(len(commands), 3)
+            self.assertIn("gpt-5.6-luna", commands[2].command)
+
+            self.appendTurnContext(session_file, "gpt-5.6-luna")
             self.appendFailure(session_file, "turn-3", error=capacity_error)
             watcher.scan()
             self.assertEqual(len(commands), 3)

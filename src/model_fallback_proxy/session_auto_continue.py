@@ -63,6 +63,7 @@ CAPACITY_MARKERS = (
     "server_overloaded",
     "server overloaded",
     "our servers are currently overloaded",
+    "an error occurred while processing your request",
     "no available accounts",
     "capacity exceeded",
     "capacity_exceeded",
