@@ -55,6 +55,18 @@ class ModelFallbackProxyTest(unittest.IsolatedAsyncioTestCase):
     def test_capacity_markers(self) -> None:
         self.assertTrue(isCapacityText("Selected model is at capacity. Please try a different model."))
         self.assertTrue(isCapacityText('{"codex_error_info":"server_overloaded"}'))
+        self.assertTrue(
+            isCapacityText(
+                "stream disconnected before completion: Our servers are currently overloaded. "
+                "Please try again later."
+            )
+        )
+        self.assertTrue(
+            isCapacityText(
+                "Error running remote compact task: stream disconnected before completion: "
+                "Our servers are currently overloaded. Please try again later."
+            )
+        )
         self.assertFalse(isCapacityText("invalid API key"))
 
     def test_http_capacity_fallback_accepts_error_headers_and_empty_503(self) -> None:
@@ -88,6 +100,13 @@ class ModelFallbackProxyTest(unittest.IsolatedAsyncioTestCase):
 
     def test_plain_text_capacity_response_is_retryable(self) -> None:
         body = b"Selected model is at capacity. Please try a different model."
+        self.assertTrue(isCapacityHttpResponse(200, body, {"Content-Type": "text/plain"}))
+
+    def test_overloaded_stream_disconnect_response_is_retryable(self) -> None:
+        body = (
+            b"Error running remote compact task: stream disconnected before completion: "
+            b"Our servers are currently overloaded. Please try again later."
+        )
         self.assertTrue(isCapacityHttpResponse(200, body, {"Content-Type": "text/plain"}))
 
     async def test_plain_text_capacity_falls_through_model_chain(self) -> None:
@@ -134,6 +153,11 @@ class ModelFallbackProxyTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(isCapacitySseEvent(raw_error))
         raw_text_error = b"data: Selected model is at capacity. Please try a different model.\n\n"
         self.assertTrue(isCapacitySseEvent(raw_text_error))
+        raw_overloaded_error = (
+            b"data: stream disconnected before completion: Our servers are currently overloaded. "
+            b"Please try again later.\n\n"
+        )
+        self.assertTrue(isCapacitySseEvent(raw_overloaded_error))
 
     def test_capacity_text_in_normal_output_is_not_an_error(self) -> None:
         normal_http = b'{"output_text":"Selected model is at capacity"}'

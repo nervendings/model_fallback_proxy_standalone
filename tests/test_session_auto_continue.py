@@ -330,6 +330,47 @@ class SessionAutoContinueTest(unittest.TestCase):
             self.assertIn("gpt-5.6-terra", commands[0].command)
             self.assertIn('model_reasoning_effort="ultra"', commands[0].command)
 
+    def test_overloaded_stream_disconnect_errors_trigger_capacity_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            session_root = root / "sessions"
+            session_root.mkdir()
+            session_file = session_root / "session.jsonl"
+            session_file.touch()
+            commands: list[FakeProcess] = []
+            watcher = self.makeWatcher(root, commands)
+            self.appendMetadata(session_file)
+            self.appendFailure(
+                session_file,
+                "turn-stream-overloaded",
+                error={
+                    "message": (
+                        "stream disconnected before completion: Our servers are currently overloaded. "
+                        "Please try again later."
+                    ),
+                    "codex_error_info": "other",
+                },
+            )
+            watcher.scan()
+            self.assertEqual(len(commands), 1)
+            self.assertIn("gpt-5.6-terra", commands[0].command)
+
+            self.appendTurnContext(session_file, "gpt-5.6-terra")
+            self.appendFailure(
+                session_file,
+                "turn-remote-compact-overloaded",
+                error={
+                    "message": (
+                        "Error running remote compact task: stream disconnected before completion: "
+                        "Our servers are currently overloaded. Please try again later."
+                    ),
+                    "codex_error_info": "other",
+                },
+            )
+            watcher.scan()
+            self.assertEqual(len(commands), 2)
+            self.assertIn("gpt-5.6-luna", commands[1].command)
+
     def test_non_gpt56_capacity_only_continues_same_model(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)

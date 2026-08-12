@@ -4,6 +4,12 @@
 
 **继续工程师（JXG / Continue Engineer）**：容量不够自动换档，失败自动重试，前台自动续上。
 
+## 0.5.4 - 2026-08-12
+
+- 识别“stream disconnected before completion: Our servers are currently overloaded”及远程 compact 同类错误。
+- 代理请求自动重试下一档 `gpt-5.6` 模型；watcher 按现有前台策略自动发送“继续”。
+- 非 `gpt-5.6` 模型仍不切换，仅继续当前会话。
+
 ## 0.5.3 - 2026-08-10
 
 - 修复容量降级强制启动后台 `codex exec resume` 导致的 `thread-store conflict`。

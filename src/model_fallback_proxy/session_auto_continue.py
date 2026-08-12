@@ -62,6 +62,7 @@ CAPACITY_MARKERS = (
     "model is at capacity",
     "server_overloaded",
     "server overloaded",
+    "our servers are currently overloaded",
     "no available accounts",
     "capacity exceeded",
     "capacity_exceeded",
