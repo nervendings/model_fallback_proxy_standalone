@@ -73,6 +73,13 @@ class ModelFallbackProxyTest(unittest.IsolatedAsyncioTestCase):
                 "You can retry your request."
             )
         )
+        self.assertTrue(
+            isCapacityText(
+                "Error running remote compact task: unexpected status 502 Bad Gateway: "
+                "Upstream service temporarily unavailable, url: http://127.0.0.1:4477/responses, "
+                "request id: xxxxx"
+            )
+        )
         self.assertFalse(isCapacityText("invalid API key"))
 
     def test_http_capacity_fallback_accepts_error_headers_and_empty_503(self) -> None:
@@ -119,6 +126,14 @@ class ModelFallbackProxyTest(unittest.IsolatedAsyncioTestCase):
         body = (
             b"stream disconnected before completion: An error occurred while processing your request. "
             b"You can retry your request, or contact us through our help center."
+        )
+        self.assertTrue(isCapacityHttpResponse(200, body, {"Content-Type": "text/plain"}))
+
+    def test_remote_compact_bad_gateway_response_is_retryable(self) -> None:
+        body = (
+            b"Error running remote compact task: unexpected status 502 Bad Gateway: "
+            b"Upstream service temporarily unavailable, url: http://127.0.0.1:4477/responses, "
+            b"request id: xxxxx"
         )
         self.assertTrue(isCapacityHttpResponse(200, body, {"Content-Type": "text/plain"}))
 
@@ -176,6 +191,12 @@ class ModelFallbackProxyTest(unittest.IsolatedAsyncioTestCase):
             b"You can retry your request.\n\n"
         )
         self.assertTrue(isCapacitySseEvent(raw_processing_error))
+        raw_bad_gateway_error = (
+            b"data: Error running remote compact task: unexpected status 502 Bad Gateway: "
+            b"Upstream service temporarily unavailable, url: http://127.0.0.1:4477/responses, "
+            b"request id: xxxxx\n\n"
+        )
+        self.assertTrue(isCapacitySseEvent(raw_bad_gateway_error))
 
     def test_capacity_text_in_normal_output_is_not_an_error(self) -> None:
         normal_http = b'{"output_text":"Selected model is at capacity"}'

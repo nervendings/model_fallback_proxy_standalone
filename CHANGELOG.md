@@ -4,6 +4,11 @@
 
 **继续工程师（JXG / Continue Engineer）**：容量不够自动换档，失败自动重试，前台自动续上。
 
+## 0.5.6 - 2026-08-13
+
+- 识别远程 compact 的 `502 Bad Gateway: Upstream service temporarily unavailable` 错误。
+- 该错误自动进入 `gpt-5.6` 换档和前台“继续”流程；其它模型保持原模型继续。
+
 ## 0.5.5 - 2026-08-12
 
 - 识别 `stream disconnected before completion: An error occurred while processing your request` 服务端瞬时错误。
