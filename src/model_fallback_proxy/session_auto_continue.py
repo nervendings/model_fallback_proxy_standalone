@@ -13,6 +13,11 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+try:
+    from .error_classification import CAPACITY_MARKERS, getRetryableModelFailureKind, isCapacityText
+except ImportError:  # pragma: no cover - 兼容直接执行源码文件。
+    from error_classification import CAPACITY_MARKERS, getRetryableModelFailureKind, isCapacityText
+
 
 DEFAULT_SESSION_ROOT = Path.home() / ".codex" / "sessions"
 DEFAULT_STATE_PATH = Path.home() / ".local" / "state" / "codex-session-auto-continue" / "state.json"
@@ -57,18 +62,6 @@ MODEL_CHAIN = (
     "gpt-5.6-terra",
     "gpt-5.6-luna",
 )
-CAPACITY_MARKERS = (
-    "selected model is at capacity",
-    "model is at capacity",
-    "server_overloaded",
-    "server overloaded",
-    "our servers are currently overloaded",
-    "an error occurred while processing your request",
-    "upstream service temporarily unavailable",
-    "no available accounts",
-    "capacity exceeded",
-    "capacity_exceeded",
-)
 MANUAL_TERMINATION_MARKERS = (
     "user aborted",
     "user_aborted",
@@ -102,14 +95,12 @@ def isManualTermination(error: Any) -> bool:
 
 
 def isCapacityError(error: Any) -> bool:
-    if not error:
-        return False
-    if isinstance(error, dict):
-        text = " ".join(str(value) for value in error.values())
-    else:
-        text = str(error)
-    normalized = text.lower()
-    return any(marker in normalized for marker in CAPACITY_MARKERS)
+    return isCapacityText(error)
+
+
+def getRetryableFailureKind(error: Any) -> str:
+    """返回可换档瞬时故障类型；空串表示只按普通失败续跑。"""
+    return getRetryableModelFailureKind(error)
 
 
 def isFailureEvent(payload: dict[str, Any]) -> bool:
@@ -828,7 +819,7 @@ class SessionAutoContinue:
             "model": model,
             "reasoning_effort": reasoning_effort,
             "force_continue": bool(
-                isCapacityError(payload.get("error"))
+                getRetryableFailureKind(payload.get("error"))
                 and (not isGpt56Model(model) or model == MODEL_CHAIN[-1])
             ),
         }
@@ -1058,33 +1049,37 @@ class SessionAutoContinue:
         current_model = str(file_state.get("model") or session.get("last_model") or MODEL_CHAIN[0]).strip() or MODEL_CHAIN[0]
         file_state["model"] = current_model
         reasoning_effort = getReasoningEffort(file_state)
-        capacity_failure = isCapacityError(payload.get("error"))
-        lowest_model_capacity_failure = bool(
-            capacity_failure and current_model == MODEL_CHAIN[-1]
+        retryable_failure_kind = getRetryableFailureKind(payload.get("error"))
+        retryable_model_failure = bool(retryable_failure_kind)
+        lowest_model_retryable_failure = bool(
+            retryable_model_failure and current_model == MODEL_CHAIN[-1]
         )
         resume_model = current_model
-        # 容量错误先沿链路下探；到最低档后继续重试，同时只保留有限历史。
+        # 容量与远程 compact 的可恢复上游故障先沿链路下探；到最低档后继续重试。
         if (
-            capacity_failure
+            retryable_model_failure
             and isGpt56Model(current_model)
             and current_model in MODEL_CHAIN
             and current_model != MODEL_CHAIN[-1]
         ):
             resume_model = getNextModel(current_model)
             file_state["model"] = resume_model
-            session["last_failure_kind"] = "capacity"
+            session["last_failure_kind"] = retryable_failure_kind
             session["failure_times"] = []
-            notice_message = f"检测到模型容量不足，自动降级 {current_model} → {resume_model}，并发送“继续”。"
+            if retryable_failure_kind == "capacity":
+                notice_message = f"检测到模型容量不足，自动降级 {current_model} → {resume_model}，并发送“继续”。"
+            else:
+                notice_message = f"检测到远程 compact 上游瞬时故障，自动降级 {current_model} → {resume_model}，并发送“继续”。"
         else:
             failure_times = [float(value) for value in session["failure_times"] if float(value) >= now - FAILURE_WINDOW_SECONDS]
             failure_times.append(now)
             session["failure_times"] = failure_times[-FAILURE_HISTORY_LIMIT:]
-            session["last_failure_kind"] = "capacity" if capacity_failure else "other"
-            if capacity_failure:
-                if lowest_model_capacity_failure:
-                    notice_message = f"最低模型 {current_model} 仍容量不足，直接重试“继续”；不再降级或放弃。"
+            session["last_failure_kind"] = retryable_failure_kind or "other"
+            if retryable_model_failure:
+                if lowest_model_retryable_failure:
+                    notice_message = f"最低模型 {current_model} 仍遇到可恢复上游故障，直接重试“继续”；不再降级或放弃。"
                 else:
-                    notice_message = f"模型 {current_model} 容量不足，自动发送“继续”并持续重试。"
+                    notice_message = f"模型 {current_model} 遇到可恢复上游故障，自动发送“继续”并持续重试。"
             else:
                 notice_message = "检测到非手动失败，自动发送“继续”并持续重试。"
         session["last_model"] = resume_model
@@ -1149,7 +1144,7 @@ class SessionAutoContinue:
         session["active"] = {"pid": pid, "turn_id": turn_id, "started_at": now}
         session["last_action"] = "background_continued"
         session["foreground"] = foreground_result
-        self.emitNotice(session_id, turn_id, notice_message, "warning" if capacity_failure else "info")
+        self.emitNotice(session_id, turn_id, notice_message, "warning" if retryable_model_failure else "info")
         self.notifySuccess(session_id, turn_id, resume_model, "background_resume")
         logging.warning(
             "auto-continue sent prompt session=%s turn=%s model=%s reasoning_effort=%s",

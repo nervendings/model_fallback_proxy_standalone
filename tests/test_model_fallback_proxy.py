@@ -19,6 +19,7 @@ from model_fallback_proxy.model_fallback_proxy import (
     isCapacityText,
     isMeaningfulSseEvent,
 )
+from model_fallback_proxy.error_classification import isRemoteCompactTransientError
 
 
 MODEL_CHAIN = ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
@@ -80,6 +81,13 @@ class ModelFallbackProxyTest(unittest.IsolatedAsyncioTestCase):
                 "request id: xxxxx"
             )
         )
+        self.assertTrue(isCapacityText("Upstream service\ntemporarily unavailable"))
+        self.assertTrue(
+            isRemoteCompactTransientError(
+                "Error running remote compact task:\n"
+                "unexpected status 502 Bad Gateway, url: http://127.0.0.1:4477/responses"
+            )
+        )
         self.assertFalse(isCapacityText("invalid API key"))
 
     def test_http_capacity_fallback_accepts_error_headers_and_empty_503(self) -> None:
@@ -87,6 +95,7 @@ class ModelFallbackProxyTest(unittest.IsolatedAsyncioTestCase):
             isCapacityHttpResponse(502, b'{"error":"unavailable"}', {"X-Codex-Error-Info": "server_overloaded"})
         )
         self.assertTrue(isCapacityHttpResponse(503, b""))
+        self.assertTrue(isCapacityHttpResponse(502, b""))
         self.assertTrue(isCapacityHttpResponse(529, b"temporary upstream failure"))
         self.assertTrue(isCapacityHttpResponse(429, b""))
         self.assertFalse(isCapacityHttpResponse(500, b"temporary upstream failure"))

@@ -451,6 +451,31 @@ class SessionAutoContinueTest(unittest.TestCase):
             self.assertEqual(len(commands), 2)
             self.assertIn("gpt-5.6-luna", commands[1].command)
 
+    def test_remote_compact_generic_bad_gateway_downgrades_after_wrapping(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            session_root = root / "sessions"
+            session_root.mkdir()
+            session_file = session_root / "session.jsonl"
+            session_file.touch()
+            commands: list[FakeProcess] = []
+            watcher = self.makeWatcher(root, commands)
+            self.appendMetadata(session_file)
+            self.appendFailure(
+                session_file,
+                "turn-remote-compact-generic-bad-gateway",
+                error={
+                    "message": (
+                        "Error running remote compact task:\n"
+                        "unexpected status 502 Bad Gateway, url: http://127.0.0.1:4477/responses"
+                    ),
+                    "codex_error_info": "other",
+                },
+            )
+            watcher.scan()
+            self.assertEqual(len(commands), 1)
+            self.assertIn("gpt-5.6-terra", commands[0].command)
+
     def test_foreground_not_ready_retries_without_background_resume(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)

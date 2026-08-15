@@ -14,6 +14,19 @@ from urllib.parse import urlsplit
 import aiohttp
 from aiohttp import web
 
+try:
+    from .error_classification import (
+        CAPACITY_MARKERS,
+        isCapacityText as isCapacityErrorText,
+        isRemoteCompactTransientError,
+    )
+except ImportError:  # pragma: no cover - 兼容直接执行源码文件。
+    from error_classification import (
+        CAPACITY_MARKERS,
+        isCapacityText as isCapacityErrorText,
+        isRemoteCompactTransientError,
+    )
+
 
 DEFAULT_UPSTREAM_URL = ""
 DEFAULT_LISTEN_HOST = "127.0.0.1"
@@ -37,19 +50,7 @@ HOP_BY_HOP_HEADERS = {
     "transfer-encoding",
     "upgrade",
 }
-CAPACITY_MARKERS = (
-    "selected model is at capacity",
-    "model is at capacity",
-    "server_overloaded",
-    "server overloaded",
-    "our servers are currently overloaded",
-    "an error occurred while processing your request",
-    "upstream service temporarily unavailable",
-    "no available accounts",
-    "capacity exceeded",
-    "capacity_exceeded",
-)
-TRANSIENT_MODEL_UNAVAILABLE_STATUSES = {429, 503, 529}
+TRANSIENT_MODEL_UNAVAILABLE_STATUSES = {429, 502, 503, 529}
 IGNORED_SSE_TYPES = {
     "ping",
     "response.created",
@@ -89,11 +90,8 @@ def readUpstreamUrl(explicit_url: str | None = None) -> str:
 
 
 def isCapacityText(raw_value: str | bytes) -> bool:
-    if isinstance(raw_value, bytes):
-        text_value = raw_value.decode("utf-8", "ignore").lower()
-    else:
-        text_value = str(raw_value).lower()
-    return any(marker in text_value for marker in CAPACITY_MARKERS)
+    """兼容既有导入入口；真实判定由共享归一化逻辑完成。"""
+    return isCapacityErrorText(raw_value)
 
 
 def getCapacityHeaderText(headers: Any) -> str:
@@ -107,9 +105,13 @@ def getCapacityHeaderText(headers: Any) -> str:
 
 def isCapacityHttpResponse(status_code: int, raw_body: bytes, headers: Any | None = None) -> bool:
     has_capacity_marker = isCapacityText(raw_body)
+    has_remote_compact_marker = isRemoteCompactTransientError(raw_body)
     if headers is not None:
         has_capacity_marker = has_capacity_marker or isCapacityText(getCapacityHeaderText(headers))
-    if has_capacity_marker:
+        has_remote_compact_marker = has_remote_compact_marker or isRemoteCompactTransientError(
+            getCapacityHeaderText(headers)
+        )
+    if has_capacity_marker or has_remote_compact_marker:
         if status_code >= 400:
             return True
         payload = parseJsonBody(raw_body)
@@ -120,14 +122,18 @@ def isCapacityHttpResponse(status_code: int, raw_body: bytes, headers: Any | Non
         if isinstance(payload.get("error"), (dict, str)):
             return True
         message = payload.get("message")
-        if isinstance(message, str) and isCapacityText(message):
+        if isinstance(message, str) and (
+            isCapacityText(message) or isRemoteCompactTransientError(message)
+        ):
             return True
         codex_error_info = payload.get("codex_error_info")
-        if isinstance(codex_error_info, str) and isCapacityText(codex_error_info):
+        if isinstance(codex_error_info, str) and (
+            isCapacityText(codex_error_info) or isRemoteCompactTransientError(codex_error_info)
+        ):
             return True
         return False
 
-    # 上游偶尔仅以 503/529 表示当前模型不可用，且不在正文暴露错误码。
+    # 上游偶尔仅以 429/502/503/529 表示当前模型不可用，且不在正文暴露错误码。
     # 此时尚未向下游输出任何内容，可以安全尝试下一模型。
     return status_code in TRANSIENT_MODEL_UNAVAILABLE_STATUSES
 
@@ -224,13 +230,13 @@ def isMeaningfulSseEvent(raw_event: bytes) -> bool:
 def isCapacitySseEvent(raw_event: bytes) -> bool:
     event_type = getSseType(raw_event)
     if event_type in {"error", "response.failed"}:
-        return isCapacityText(raw_event)
+        return isCapacityText(raw_event) or isRemoteCompactTransientError(raw_event)
     if event_type:
         return False
     # 部分中转会把失败文本或 JSON 放进 text/event-stream，但不带 event/type 字段。
     # 结构化的正常输出有明确事件类型，不会走到这里；无类型容量提示应直接重试。
     text_value = raw_event.decode("utf-8", "ignore").lower()
-    return isCapacityText(text_value)
+    return isCapacityText(text_value) or isRemoteCompactTransientError(text_value)
 
 
 def isSseResponse(headers: Any) -> bool:

@@ -4,6 +4,12 @@
 
 **继续工程师（JXG / Continue Engineer）**：容量不够自动换档，失败自动重试，前台自动续上。
 
+## 0.5.7 - 2026-08-16
+
+- 统一错误归一化，终端换行或嵌套错误字段不会漏判。
+- 远程 compact 遇到通用 502 Bad Gateway、429/503/529、Bad Gateway 或 Upstream service temporarily unavailable 时，自动进入换档与“继续”流程。
+- 仅远程 compact 的可恢复上游故障进入换档；普通失败仍按既有逻辑直接续跑。
+
 ## 0.5.6 - 2026-08-13
 
 - 识别远程 compact 的 `502 Bad Gateway: Upstream service temporarily unavailable` 错误。
