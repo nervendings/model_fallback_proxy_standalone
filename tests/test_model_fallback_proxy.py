@@ -100,12 +100,15 @@ class ModelFallbackProxyTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(isCapacityHttpResponse(429, b""))
         self.assertFalse(isCapacityHttpResponse(500, b"temporary upstream failure"))
 
-    def test_default_model_chain_stops_at_luna(self) -> None:
-        self.assertEqual(DEFAULT_MODEL_CHAIN, MODEL_CHAIN)
+    def test_default_model_chain_uses_policy_single_model_placeholder(self) -> None:
+        """未配置策略时默认链只含单一占位模型，防止重新硬编码旧 gpt-5.6 链路。"""
+        self.assertEqual(DEFAULT_MODEL_CHAIN, ("deepseek-v4-flash",))
 
-    def test_non_gpt56_model_does_not_enter_fallback_chain(self) -> None:
+    def test_build_candidates_uses_only_configured_chain(self) -> None:
         state = ProxyState(("gpt-5.5", "gpt-5.6-luna"), cooldown_seconds=30)
-        self.assertEqual(state.buildCandidates("gpt-5.5"), ["gpt-5.5"])
+        # 链内模型参与降级；链外模型保持原样。
+        self.assertEqual(state.buildCandidates("gpt-5.5"), ["gpt-5.5", "gpt-5.6-luna"])
+        self.assertEqual(state.buildCandidates("unknown-model"), ["unknown-model"])
 
     def test_upstream_url_requires_explicit_safe_environment_value(self) -> None:
         from model_fallback_proxy.model_fallback_proxy import readUpstreamUrl
@@ -216,18 +219,20 @@ class ModelFallbackProxyTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(isCapacityHttpResponse(200, normal_http))
         self.assertFalse(isCapacitySseEvent(normal_sse))
 
-    def test_top_level_reasoning_effort_rewrite_is_supported(self) -> None:
-        payload = {"model": "gpt-5.6-sol", "reasoning_effort": "ultra"}
-        luna_payload = buildAttemptPayload(payload, "gpt-5.6-luna")
-        self.assertEqual(luna_payload["reasoning_effort"], "max")
-        self.assertEqual(payload["reasoning_effort"], "ultra")
+    def test_reasoning_effort_rewrites_are_applied_per_model_table(self) -> None:
+        """档位改写表当前为空（deepseek 链无需改写）；验证机制仍可用且不改原 payload。"""
+        from model_fallback_proxy import model_fallback_proxy as proxy_module
 
-    def test_luna_rewrites_unsupported_ultra_effort(self) -> None:
-        payload = {"model": "gpt-5.6-sol", "reasoning": {"effort": "ultra", "summary": "auto"}}
-        terra_payload = buildAttemptPayload(payload, "gpt-5.6-terra")
-        luna_payload = buildAttemptPayload(payload, "gpt-5.6-luna")
-        self.assertEqual(terra_payload["reasoning"]["effort"], "ultra")
-        self.assertEqual(luna_payload["reasoning"]["effort"], "max")
+        payload = {"model": "m1", "reasoning_effort": "ultra", "reasoning": {"effort": "ultra", "summary": "auto"}}
+        with patch.dict(proxy_module.MODEL_REASONING_EFFORT_REWRITES, {"m2": {"ultra": "max"}}, clear=True):
+            rewritten = buildAttemptPayload(payload, "m2")
+            self.assertEqual(rewritten["reasoning_effort"], "max")
+            self.assertEqual(rewritten["reasoning"]["effort"], "max")
+            untouched = buildAttemptPayload(payload, "m1")
+            self.assertEqual(untouched["reasoning_effort"], "ultra")
+            self.assertEqual(untouched["reasoning"]["effort"], "ultra")
+        # 原 payload 绝不被修改。
+        self.assertEqual(payload["reasoning_effort"], "ultra")
         self.assertEqual(payload["reasoning"]["effort"], "ultra")
 
     async def test_http_and_sse_capacity_fall_through_chain(self) -> None:

@@ -10,10 +10,13 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+from model_fallback_proxy import session_auto_continue as auto_continue_module
 from model_fallback_proxy.session_auto_continue import SessionAutoContinue
 
 
 SESSION_ID = "00000000-0000-4000-8000-000000000001"
+# 链遍历语义测试固定用三段测试链；生产链由 model_policy.json 决定。
+TEST_MODEL_CHAIN = ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
 
 
 class FakeStdin:
@@ -66,6 +69,16 @@ def writeSessionMeta(path: Path) -> None:
 
 
 class SessionAutoContinueTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._chain_patcher = patch.object(auto_continue_module, "MODEL_CHAIN", TEST_MODEL_CHAIN)
+        self._primary_patcher = patch.object(auto_continue_module, "PRIMARY_MODEL", TEST_MODEL_CHAIN[0])
+        self._chain_patcher.start()
+        self._primary_patcher.start()
+
+    def tearDown(self) -> None:
+        self._primary_patcher.stop()
+        self._chain_patcher.stop()
+
     def makeWatcher(
         self,
         root: Path,
@@ -512,6 +525,100 @@ class SessionAutoContinueTest(unittest.TestCase):
             self.assertEqual(len(requests), 2)
             self.assertEqual(watcher.state["pending_failures"], [])
             self.assertEqual(watcher.state["sessions"][SESSION_ID]["last_action"], "foreground_continued")
+
+    def test_prune_drops_legacy_zombie_pending_failures(self) -> None:
+        """旧版遗留的高重试 pending 在启动时清理，避免僵尸重试。"""
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            state_path = root / "state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "initialized": True,
+                        "files": {},
+                        "sessions": {},
+                        "pending_failures": [
+                            {"session_id": SESSION_ID, "turn_id": "turn-old", "mode": "foreground", "retry_count": 50000},
+                            {"session_id": "other", "turn_id": "turn-fresh", "mode": "foreground", "retry_count": 2},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            watcher = SessionAutoContinue(state_path=state_path, allow_background_fallback=False)
+            remaining = watcher.state["pending_failures"]
+            self.assertEqual(len(remaining), 1)
+            self.assertEqual(remaining[0]["turn_id"], "turn-fresh")
+            self.assertIn("queued_at", remaining[0])
+
+    def test_pending_expires_without_injection(self) -> None:
+        """等待超过上限仍未注入成功的项被丢弃，不再无限重试。"""
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            session_root = root / "sessions"
+            session_root.mkdir()
+            session_file = session_root / "session.jsonl"
+            session_file.touch()
+            commands: list[FakeProcess] = []
+            clock = [100.0]
+            watcher = self.makeWatcher(
+                root,
+                commands,
+                foreground_adapter=lambda request: {"status": "observe_only", "reason": "prompt_not_ready"},
+                time_fn=lambda: clock[0],
+            )
+            watcher.pending_max_age_seconds = 60.0
+            self.appendMetadata(session_file)
+            self.appendFailure(session_file, "turn-wait")
+            watcher.scan()
+            self.assertEqual(len(watcher.state["pending_failures"]), 1)
+
+            clock[0] += 120.0
+            watcher.scan()
+            self.assertEqual(watcher.state["pending_failures"], [])
+
+    def test_recovered_session_is_not_injected(self) -> None:
+        """会话已有后续回合（tail=active）或已完成时，不注入、不排队，避免打扰正常对话。"""
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            session_root = root / "sessions"
+            session_root.mkdir()
+            session_file = session_root / "session.jsonl"
+            session_file.touch()
+            watcher = self.makeWatcher(root, [])
+            self.appendMetadata(session_file)
+            self.appendFailure(session_file, "turn-1")
+            # 会话在失败后已自行恢复：收到新的 task_started。
+            writeEvent(session_file, {"type": "task_started", "turn_id": "turn-2"})
+            watcher.scan()
+            self.assertEqual(watcher.state["pending_failures"], [])
+            self.assertEqual(watcher.state["sessions"][SESSION_ID]["last_action"], "foreground_skipped_active")
+
+    def test_completed_tail_pending_is_dropped_on_retry(self) -> None:
+        """失败后会话已完成成功回合时，重试轮询直接清理等待项。"""
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            session_root = root / "sessions"
+            session_root.mkdir()
+            session_file = session_root / "session.jsonl"
+            session_file.touch()
+            clock = [500.0]
+            watcher = self.makeWatcher(
+                root,
+                [],
+                foreground_adapter=lambda request: {"status": "observe_only", "reason": "prompt_not_ready"},
+                time_fn=lambda: clock[0],
+            )
+            self.appendMetadata(session_file)
+            self.appendFailure(session_file, "turn-1")
+            watcher.scan()
+            self.assertEqual(len(watcher.state["pending_failures"]), 1)
+            # 用户手动恢复并成功完成。
+            writeEvent(session_file, {"type": "task_started", "turn_id": "turn-2"})
+            writeEvent(session_file, {"type": "task_complete", "turn_id": "turn-2"})
+            clock[0] += 3.0
+            watcher.scan()
+            self.assertEqual(watcher.state["pending_failures"], [])
 
     def test_luna_capacity_failure_requests_force_continue(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:

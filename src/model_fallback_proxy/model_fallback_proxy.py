@@ -8,6 +8,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -31,11 +32,8 @@ except ImportError:  # pragma: no cover - 兼容直接执行源码文件。
 DEFAULT_UPSTREAM_URL = ""
 DEFAULT_LISTEN_HOST = "127.0.0.1"
 DEFAULT_LISTEN_PORT = 4477
-DEFAULT_MODEL_CHAIN = (
-    "gpt-5.6-sol",
-    "gpt-5.6-terra",
-    "gpt-5.6-luna",
-)
+MODEL_POLICY_PATH = Path.home() / ".codex" / "model_policy.json"
+DEFAULT_MODEL_CHAIN = ("deepseek-v4-flash",)
 DEFAULT_COOLDOWN_SECONDS = 180
 MAX_INSPECTION_BYTES = 1024 * 1024
 HOP_BY_HOP_HEADERS = {
@@ -63,20 +61,34 @@ IGNORED_SSE_TYPES = {
     "response.output_text.done",
     "response.completed",
 }
-MODEL_REASONING_EFFORT_REWRITES = {
-    "gpt-5.6-luna": {"ultra": "max"},
-}
+MODEL_REASONING_EFFORT_REWRITES: dict[str, dict[str, str]] = {}
 
 
-def isGpt56Model(model_name: str) -> bool:
-    """只有 gpt-5.6 系列允许进入本项目的自动降级链。"""
-    return str(model_name or "").strip().lower().startswith("gpt-5.6-")
+def _loadModelPolicy() -> dict[str, Any]:
+    """读取统一模型策略；缺失或损坏时返回空字典，由调用方兜底。"""
+    try:
+        import json
+
+        return json.loads(MODEL_POLICY_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
 
 
 def readModelChain() -> tuple[str, ...]:
     raw_value = os.getenv("CODEX_FALLBACK_MODEL_CHAIN", "")
     values = tuple(item.strip() for item in raw_value.split(",") if item.strip())
-    return values or DEFAULT_MODEL_CHAIN
+    if values:
+        return values
+    policy = _loadModelPolicy()
+    chain = policy.get("fallback") or [policy.get("primary") or "deepseek-v4-flash"]
+    return tuple(str(model) for model in chain) or DEFAULT_MODEL_CHAIN
+
+
+def isGpt56Model(model_name: str) -> bool:
+    """只有策略链内模型允许进入自动降级链（链由 model_policy.json 动态配置）。"""
+    return str(model_name or "").strip().lower() in {
+        model.lower() for model in readModelChain()
+    }
 
 
 def readUpstreamUrl(explicit_url: str | None = None) -> str:
@@ -254,7 +266,8 @@ class ProxyState:
     capacity_count: int = 0
 
     def buildCandidates(self, requested_model: str) -> list[str]:
-        if not isGpt56Model(requested_model) or requested_model not in self.model_chain:
+        # 链内模型才参与自动降级；链由创建代理时的配置决定（env / model_policy）。
+        if requested_model not in self.model_chain:
             return [requested_model]
         start_index = self.model_chain.index(requested_model)
         model_slice = list(self.model_chain[start_index:])
