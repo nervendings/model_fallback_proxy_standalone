@@ -53,6 +53,8 @@ DEFAULT_PENDING_MAX_AGE_SECONDS = 21600.0
 # 历史遗留项没有 queued_at，重试次数失控即按僵尸处理（正常项 6 小时内到不了 1000 次）。
 LEGACY_PENDING_RETRY_THRESHOLD = 1000
 SESSION_TAIL_SCAN_BYTES = 262144
+# 会话文件在此窗口内仍有写入即视为回合进行中（用于长回合的保守判定）。
+ACTIVE_MTIME_WINDOW_SECONDS = 120.0
 FOREGROUND_RETRYABLE_REASONS = {
     "target_not_unique",
     "prompt_not_ready",
@@ -596,6 +598,13 @@ class SessionAutoContinue:
                 return "manual"
             if event_type == "task_started":
                 return "active"
+        # 窗口内没有任务边界事件：回合很长时 task_started 早已滑出窗口。
+        # 文件仍在持续写入（mtime 很新）说明回合进行中，保守判为 active 不注入。
+        try:
+            if self.time_fn() - path.stat().st_mtime <= ACTIVE_MTIME_WINDOW_SECONDS:
+                return "active"
+        except OSError:
+            pass
         return "unknown"
 
     def reapProcesses(self) -> None:
@@ -1095,9 +1104,9 @@ class SessionAutoContinue:
         }
         if isinstance(item.get("virtual_employee"), dict):
             file_state["virtual_employee"] = dict(item["virtual_employee"])
-        # 会话已恢复（有后续回合或已完成）时直接放弃本次注入，避免打扰正常对话。
+        # 仅当会话尾部仍处于“失败待恢复”时才注入；任何其它状态都跳过，避免打扰正常对话。
         tail_state = self.getSessionTailState(session_id)
-        if tail_state in {"active", "completed", "manual"}:
+        if tail_state != "awaiting":
             session = self.getSessionState(session_id)
             session["last_action"] = f"foreground_skipped_{tail_state}"
             logging.info(

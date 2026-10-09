@@ -115,7 +115,7 @@ PROMPT_MARKERS = ("›", "»", "❯")
 PROMPT_PLACEHOLDERS = ("ask codex",)
 BUSY_INDICATORS = ("esc to interrupt", "• working", "◦ working", "tab to queue message")
 # 忙碌行可能因终端宽度被截断为“(2h…”，用耗时模式兜底识别。
-BUSY_ELAPSED_RE = re.compile(r"\(\d+\s*[hms]")
+BUSY_ELAPSED_RE = re.compile(r"\(\d+\s*[hms](?:\s|\u2026|•|\)|$)")
 
 
 def isPromptMarkerChar(line: str) -> bool:
