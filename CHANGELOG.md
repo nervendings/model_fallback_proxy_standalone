@@ -4,6 +4,16 @@
 
 **继续工程师（JXG / Continue Engineer）**：容量不够自动换档，失败自动重试，前台自动续上。
 
+## 0.5.9 - 2026-10-16
+
+- 新增「会话历史密文损坏」熔断：服务端 hydration 失败（`encrypted content ... could not be verified`）
+  属不可恢复故障，`handleFailure` 不再无差别重试（实测旧行为对 PM 会话重试 61 次），
+  直接停止自动续跑、置 `last_action=corrupted_history` 并提示人工接管（开新会话 / 先 /compact）。
+- `error_classification.py` 新增 `isCorruptedHistoryError`：只匹配 hydration 明确特征，
+  不误伤通用 400002（input.type/tool.type）与容量类错误。
+- 测试 +2：分类器单元测试（真/假阳性边界）+ 守护集成测试（不产生续跑命令、不排队、发 error 提示）；
+  全量 75 tests PASS，仓库质量门禁 PASS。
+
 ## 0.5.8 - 2026-10-09
 
 - 修复前台“继续”自 2026-09-30 起完全无法注入的问题（实测注入成功率归零、71 个任务积压）：

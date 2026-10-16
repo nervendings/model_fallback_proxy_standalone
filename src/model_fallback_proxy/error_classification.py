@@ -25,6 +25,15 @@ REMOTE_COMPACT_TRANSIENT_MARKERS = (
     "temporarily unavailable",
 )
 REMOTE_COMPACT_TRANSIENT_STATUS_RE = re.compile(r"(?:unexpected\s+status\s+)?(?:429|502|503|529)\b")
+# 会话历史损坏类错误：重试、换模型或“继续”都无法恢复，必须人工处理。
+# 典型：某条历史 item 的 encrypted_content 不是可解密内容（被明文/损坏内容占据），
+# 服务端每次 hydrate 该 item 都失败，导致此后每个回合都以同一错误失败（实测 77 连败）。
+CORRUPTED_HISTORY_MARKERS = (
+    "could not be verified",
+    "hydration failed",
+    "could not be decrypted or parsed",
+    "encrypted content hydration",
+)
 
 
 def normalizeErrorText(raw_value: Any) -> str:
@@ -68,3 +77,12 @@ def getRetryableModelFailureKind(raw_value: Any) -> str:
     if isRemoteCompactTransientError(raw_value):
         return "remote_compact_transient"
     return ""
+
+
+def isCorruptedHistoryError(raw_value: Any) -> bool:
+    """历史条目密文损坏，重试无意义；调用方应停止自动续跑并提示人工接管。"""
+    normalized = normalizeErrorText(raw_value)
+    if not normalized:
+        return False
+    # 只匹配密文水合失败的明确特征；通用 400002（input.type/tool.type 等）可能可恢复，不能误伤。
+    return any(marker in normalized for marker in CORRUPTED_HISTORY_MARKERS)

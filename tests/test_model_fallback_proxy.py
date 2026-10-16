@@ -19,7 +19,7 @@ from model_fallback_proxy.model_fallback_proxy import (
     isCapacityText,
     isMeaningfulSseEvent,
 )
-from model_fallback_proxy.error_classification import isRemoteCompactTransientError
+from model_fallback_proxy.error_classification import isCorruptedHistoryError, isRemoteCompactTransientError
 
 
 MODEL_CHAIN = ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
@@ -148,6 +148,25 @@ class ModelFallbackProxyTest(unittest.IsolatedAsyncioTestCase):
             b"request id: xxxxx"
         )
         self.assertTrue(isCapacityHttpResponse(200, body, {"Content-Type": "text/plain"}))
+
+    def test_corrupted_history_encrypted_content_is_detected(self) -> None:
+        """密文水合失败必须识别，避免自动续跑无意义重试。"""
+        message = (
+            "stream disconnected before completion: The encrypted content for item "
+            "amsg_01a14167-6378-77b0-8d62-6acadf4009cb could not be verified. Reason: "
+            "encrypted content hydration failed: Encrypted content could not be decrypted or parsed."
+        )
+        self.assertTrue(isCorruptedHistoryError({"message": message, "codex_error_info": "other"}))
+        self.assertTrue(isCorruptedHistoryError("encrypted content hydration failed"))
+        # 通用 400002/容量类错误不能误判为历史损坏。
+        self.assertFalse(
+            isCorruptedHistoryError(
+                '{"error":{"code":"400002","message":"The request parameter input is invalid or missing.",'
+                '"param":"input","type":"invalid_request_error"}}'
+            )
+        )
+        self.assertFalse(isCorruptedHistoryError("selected model is at capacity"))
+        self.assertFalse(isCorruptedHistoryError(None))
 
     async def test_plain_text_capacity_falls_through_model_chain(self) -> None:
         attempted_models: list[str] = []

@@ -464,6 +464,38 @@ class SessionAutoContinueTest(unittest.TestCase):
             self.assertEqual(len(commands), 2)
             self.assertIn("gpt-5.6-luna", commands[1].command)
 
+    def test_corrupted_history_stops_auto_continue_and_notifies(self) -> None:
+        """密文水合失败应停止自动续跑并提示人工接管，不得进入重试队列。"""
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            session_root = root / "sessions"
+            session_root.mkdir()
+            session_file = session_root / "session.jsonl"
+            session_file.touch()
+            commands: list[FakeProcess] = []
+            watcher = self.makeWatcher(root, commands)
+            self.appendMetadata(session_file)
+            self.appendFailure(
+                session_file,
+                "turn-corrupted-history",
+                error={
+                    "message": (
+                        "stream disconnected before completion: The encrypted content for item "
+                        "amsg_01a14167-6378-77b0-8d62-6acadf4009cb could not be verified. Reason: "
+                        "encrypted content hydration failed: Encrypted content could not be decrypted or parsed."
+                    ),
+                    "codex_error_info": "other",
+                },
+            )
+            watcher.scan()
+            # 不产生任何续跑命令，也不排队重试。
+            self.assertEqual([], commands)
+            self.assertEqual([], watcher.state.get("pending_failures") or [])
+            session_state = watcher.state["sessions"][SESSION_ID]
+            self.assertEqual("corrupted_history", session_state.get("last_action"))
+            self.assertEqual("error", (session_state.get("last_notice") or {}).get("level"))
+            self.assertIn("密文损坏", str((session_state.get("last_notice") or {}).get("message") or ""))
+
     def test_remote_compact_generic_bad_gateway_downgrades_after_wrapping(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)

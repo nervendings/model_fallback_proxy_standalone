@@ -14,9 +14,19 @@ from pathlib import Path
 from typing import Any, Callable
 
 try:
-    from .error_classification import CAPACITY_MARKERS, getRetryableModelFailureKind, isCapacityText
+    from .error_classification import (
+        CAPACITY_MARKERS,
+        getRetryableModelFailureKind,
+        isCapacityText,
+        isCorruptedHistoryError,
+    )
 except ImportError:  # pragma: no cover - 兼容直接执行源码文件。
-    from error_classification import CAPACITY_MARKERS, getRetryableModelFailureKind, isCapacityText
+    from error_classification import (
+        CAPACITY_MARKERS,
+        getRetryableModelFailureKind,
+        isCapacityText,
+        isCorruptedHistoryError,
+    )
 
 
 DEFAULT_SESSION_ROOT = Path.home() / ".codex" / "sessions"
@@ -1164,6 +1174,22 @@ class SessionAutoContinue:
         session = self.getSessionState(session_id)
         handled_turn_ids = [str(value) for value in session["handled_turn_ids"]]
         if turn_id in handled_turn_ids:
+            return
+        # 历史密文损坏：重试/换档/“继续”均无法恢复（服务端逐条 hydrate 失败），
+        # 直接放弃自动续跑并提示人工接管，避免 61 次僵尸重试放大故障。
+        if isCorruptedHistoryError(payload.get("error")):
+            handled_turn_ids.append(turn_id)
+            session["handled_turn_ids"] = handled_turn_ids[-MAX_HANDLED_TURNS:]
+            session["last_action"] = "corrupted_history"
+            session["last_failure_kind"] = "corrupted_history"
+            self.emitNotice(
+                session_id,
+                turn_id,
+                "检测到会话历史密文损坏（服务端无法解密历史条目），自动续跑已停止；"
+                "请开新会话接续任务，或在原会话执行 /compact 后再试。",
+                "error",
+            )
+            logging.warning("auto-continue corrupted history session=%s turn=%s", session_id, turn_id)
             return
         if self.isSessionActive(session_id):
             if allow_pending:
