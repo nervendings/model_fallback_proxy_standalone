@@ -17,11 +17,13 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Protocol, Sequence
+from typing import Any, Mapping, Protocol, Sequence
 
 
 PAYLOAD = "继续\r"
 BACKOFF_SECONDS = (30, 60, 120, 240, 300)
+WSH_SCROLLBACK_TIMEOUT_SECONDS = 6.0
+SCROLLBACK_TAIL_CHARS = 4000
 ANSI_ESCAPE_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 SESSION_ID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE)
 BLOCK_ID_LINE_RE = re.compile(
@@ -50,7 +52,95 @@ def findSessionBlockId(session_id: str, snapshot_root: Path | str | None = None)
                     return block_id
         except OSError:
             continue
+    # 兜底：直接从持有该会话文件的 Codex 进程恢复 block id。
+    return findSessionBlockIdViaProc(session_id)
+
+
+def findSessionBlockIdViaProc(session_id: str) -> str:
+    """扫描 /proc，从打开该会话 jsonl 的进程环境里取 WAVETERM_BLOCKID。"""
+    session_id = str(session_id or "").strip()
+    if not SESSION_ID_RE.fullmatch(session_id):
+        return ""
+    for entry in Path("/proc").glob("[0-9]*"):
+        try:
+            fds = entry / "fd"
+            for fd in fds.iterdir():
+                try:
+                    link = os.readlink(fd)
+                except (OSError, TypeError):
+                    continue
+                if not isinstance(link, str):
+                    continue
+                name = Path(link).name
+                if not name.endswith(".jsonl") or session_id not in name:
+                    continue
+                env_block = readProcEnvValue(entry, "WAVETERM_BLOCKID")
+                if SESSION_ID_RE.fullmatch(env_block):
+                    return env_block
+        except (OSError, TypeError, ValueError):
+            continue
     return ""
+
+
+def readProcEnvValue(entry: Path, key: str) -> str:
+    """读取指定进程环境变量；失败返回空串。"""
+    try:
+        for item in (entry / "environ").read_bytes().split(b"\0"):
+            if b"=" not in item:
+                continue
+            name, value = item.split(b"=", 1)
+            if name.decode(errors="ignore") == key:
+                return value.decode(errors="ignore").strip()
+    except OSError:
+        return ""
+    return ""
+
+
+def resolveWshPath(env: Mapping[str, str]) -> str:
+    """解析 wsh 可执行文件：优先目标终端携带的 WAVETERM_WSHBINDIR，再查常见安装目录。"""
+    candidates: list[Path] = []
+    bindir = str(env.get("WAVETERM_WSHBINDIR") or "").strip()
+    if bindir:
+        candidates.append(Path(bindir) / "wsh")
+    candidates.append(Path.home() / ".local" / "share" / "waveterm" / "bin" / "wsh")
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return shutil.which("wsh") or ""
+
+
+# 新版 TUI 的可输入提示符：空输入框显示“› Ask Codex to do anything”，
+# 忙碌时该提示符同样存在，因此还要靠上方的运行态指示区分（见 isBusyIndicatorLine）。
+PROMPT_MARKERS = ("›", "»", "❯")
+PROMPT_PLACEHOLDERS = ("ask codex",)
+BUSY_INDICATORS = ("esc to interrupt", "• working", "◦ working", "tab to queue message")
+# 忙碌行可能因终端宽度被截断为“(2h…”，用耗时模式兜底识别。
+BUSY_ELAPSED_RE = re.compile(r"\(\d+\s*[hms](?:\s|\u2026|•|\)|$)")
+
+
+def isPromptMarkerChar(line: str) -> bool:
+    """判断一行是否以输入提示符字符开头（可能带用户草稿文本）。"""
+    stripped = line.strip()
+    return bool(stripped) and stripped[0] in PROMPT_MARKERS
+
+
+def isPromptPlaceholderLine(line: str) -> bool:
+    """判断提示符行是否为“空输入框”（无草稿文本，或只有默认占位文案）。"""
+    stripped = line.strip()
+    if not stripped or stripped[0] not in PROMPT_MARKERS:
+        return False
+    rest = stripped[1:].strip().lower()
+    if not rest:
+        return True
+    return any(rest.startswith(placeholder) for placeholder in PROMPT_PLACEHOLDERS)
+
+
+def isBusyIndicatorLine(line: str) -> bool:
+    """判断一行是否表示当前回合仍在运行（工作中指示、排队提示、被截断的耗时标记等）。"""
+    lowered = line.lower()
+    if any(indicator in lowered for indicator in BUSY_INDICATORS):
+        return True
+    return bool(BUSY_ELAPSED_RE.search(line))
 
 
 @dataclass(frozen=True)
@@ -241,20 +331,28 @@ class WaveTermForegroundAdapter:
                 key = key.decode(errors="ignore")
                 if key.startswith("WAVETERM_"):
                     env[key] = value.decode(errors="ignore")
-            wsh = os.environ.get("WAVETERM_WSH") or shutil.which("wsh") or "wsh"
+            # systemd 服务环境通常没有 wsh 在 PATH；优先用目标终端的
+            # WAVETERM_WSHBINDIR 与常见安装路径，最后才回落 PATH 探测。
+            wsh = (
+                os.environ.get("WAVETERM_WSH")
+                or env.get("WAVETERM_WSH")
+                or resolveWshPath(env)
+                or "wsh"
+            )
             result = subprocess.run(
                 [wsh, "termscrollback", "-b", target.block_id],
                 cwd=target.cwd or None,
                 env=env,
                 text=True,
                 capture_output=True,
-                timeout=2.0,
+                timeout=WSH_SCROLLBACK_TIMEOUT_SECONDS,
                 check=False,
             )
             if result.returncode != 0:
                 return ""
-            # 只保留末尾屏幕，避免历史文本中的 commit/delete 等词误触安全门禁。
-            return ANSI_ESCAPE_RE.sub("", result.stdout[-1600:])
+            # 只保留末尾屏幕，避免历史文本中的 commit/delete 等词误触安全门禁；
+            # 4000 字符保证“工作中”标志行（esc to interrupt）不会被长行截断切掉。
+            return ANSI_ESCAPE_RE.sub("", result.stdout[-SCROLLBACK_TAIL_CHARS:])
         except (OSError, subprocess.SubprocessError, UnicodeError):
             return ""
 
@@ -351,19 +449,25 @@ class WaveTermForegroundAdapter:
 
     @staticmethod
     def _ready_prompt(prompt_text: str) -> tuple[bool, str]:
-        lines = [re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", line).rstrip() for line in prompt_text.splitlines()]
+        lines = [ANSI_ESCAPE_RE.sub("", line).rstrip() for line in prompt_text.splitlines()]
+        window = lines[-40:]
         marker_index = -1
-        for index in range(len(lines) - 1, -1, -1):
-            if lines[index].strip() in {"›", "»", ">"}:
+        # 真提示符只可能出现在窗口底部，避免把历史正文里的“›”当成输入框。
+        for index in range(len(window) - 1, max(len(window) - 13, -1), -1):
+            if isPromptMarkerChar(window[index]):
                 marker_index = index
                 break
         if marker_index < 0:
             return False, ""
-        suffix = [line.strip() for line in lines[marker_index + 1:] if line.strip()]
-        allowed_status = ("gpt-5.", "gpt-4.", "─ worked", "goal ", "context ")
-        if any(not line.lower().startswith(allowed_status) for line in suffix):
-            return False, "\n".join(suffix)
+        # 提示符行上已存在用户草稿文本时不允许注入，避免覆盖或误发。
+        if not isPromptPlaceholderLine(window[marker_index]):
+            return False, ""
+        # 忙碌窗口：`esc to interrupt`、`• Working (...)` 说明当前回合未结束；
+        # 此时注入会排入当前回合并产生多余输入，判定为未就绪（不影响进行中的对话）。
+        if any(isBusyIndicatorLine(line) for line in window[-16:]):
+            return False, ""
         # 审批/确认界面不会出现空的可输入提示符；只检查提示符后的状态栏，避免历史文本误报。
+        suffix = [line.strip() for line in window[marker_index + 1:] if line.strip()]
         return True, "\n".join(suffix)
 
     def inject(self, event_id: str, target: WaveTermCandidate, *, now: float | None = None) -> dict[str, Any]:
