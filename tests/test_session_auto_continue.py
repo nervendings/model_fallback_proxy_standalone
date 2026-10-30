@@ -10,10 +10,13 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+from model_fallback_proxy import session_auto_continue as auto_continue_module
 from model_fallback_proxy.session_auto_continue import SessionAutoContinue
 
 
 SESSION_ID = "00000000-0000-4000-8000-000000000001"
+# 链遍历语义测试固定用三段测试链；生产链由 model_policy.json 决定。
+TEST_MODEL_CHAIN = ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
 
 
 class FakeStdin:
@@ -66,6 +69,16 @@ def writeSessionMeta(path: Path) -> None:
 
 
 class SessionAutoContinueTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._chain_patcher = patch.object(auto_continue_module, "MODEL_CHAIN", TEST_MODEL_CHAIN)
+        self._primary_patcher = patch.object(auto_continue_module, "PRIMARY_MODEL", TEST_MODEL_CHAIN[0])
+        self._chain_patcher.start()
+        self._primary_patcher.start()
+
+    def tearDown(self) -> None:
+        self._primary_patcher.stop()
+        self._chain_patcher.stop()
+
     def makeWatcher(
         self,
         root: Path,
@@ -99,18 +112,24 @@ class SessionAutoContinueTest(unittest.TestCase):
         watcher.bootstrap()
         return watcher
 
-    def appendMetadata(self, path: Path) -> None:
-        writeEvent(path, {"type": "session_meta", "session_id": SESSION_ID, "originator": "codex-tui", "cwd": "/tmp"})
-        writeEvent(path, {"type": "thread_settings_applied", "thread_settings": {"model": "gpt-5.6-sol", "cwd": "/tmp", "reasoning_effort": "xhigh"}})
+    def appendMetadata(
+        self,
+        path: Path,
+        originator: str = "codex-tui",
+        effort: str = "xhigh",
+        model: str = "gpt-5.6-sol",
+    ) -> None:
+        writeEvent(path, {"type": "session_meta", "session_id": SESSION_ID, "originator": originator, "cwd": "/tmp"})
+        writeEvent(path, {"type": "thread_settings_applied", "thread_settings": {"model": model, "cwd": "/tmp", "reasoning_effort": effort}})
         writeEvent(
             path,
             {
                 "type": "turn_context",
                 "turn_id": "turn-context",
                 "cwd": "/tmp",
-                "model": "gpt-5.6-sol",
-                "effort": "xhigh",
-                "collaboration_mode": {"settings": {"model": "gpt-5.6-sol", "reasoning_effort": "xhigh"}},
+                "model": model,
+                "effort": effort,
+                "collaboration_mode": {"settings": {"model": model, "reasoning_effort": effort}},
             },
         )
 
@@ -261,6 +280,22 @@ class SessionAutoContinueTest(unittest.TestCase):
             self.assertIn("gpt-5.6-luna", commands[1].command)
 
             self.appendTurnContext(session_file, "gpt-5.6-luna")
+            self.appendFailure(
+                session_file,
+                "turn-processing-error",
+                error={
+                    "message": (
+                        "stream disconnected before completion: An error occurred while processing your request. "
+                        "You can retry your request, or contact us through our help center."
+                    ),
+                    "codex_error_info": "other",
+                },
+            )
+            watcher.scan()
+            self.assertEqual(len(commands), 3)
+            self.assertIn("gpt-5.6-luna", commands[2].command)
+
+            self.appendTurnContext(session_file, "gpt-5.6-luna")
             self.appendFailure(session_file, "turn-3", error=capacity_error)
             watcher.scan()
             self.assertEqual(len(commands), 3)
@@ -279,7 +314,7 @@ class SessionAutoContinueTest(unittest.TestCase):
             self.assertEqual(len(commands), 5)
             self.assertEqual(watcher.state["sessions"][SESSION_ID]["last_action"], "background_continued")
 
-    def test_capacity_downgrade_uses_resume_instead_of_original_foreground(self) -> None:
+    def test_capacity_downgrade_uses_foreground_without_background_resume(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)
             session_root = root / "sessions"
@@ -300,9 +335,322 @@ class SessionAutoContinueTest(unittest.TestCase):
                 error={"message": "Selected model is at capacity", "codex_error_info": "server_overloaded"},
             )
             watcher.scan()
+            self.assertEqual(commands, [])
+            self.assertEqual(requests[0]["model"], "gpt-5.6-terra")
+            self.assertEqual(watcher.state["sessions"][SESSION_ID]["last_action"], "foreground_continued")
+
+    def test_capacity_downgrade_preserves_ultra_effort(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            session_root = root / "sessions"
+            session_root.mkdir()
+            session_file = session_root / "session.jsonl"
+            session_file.touch()
+            commands: list[FakeProcess] = []
+            watcher = self.makeWatcher(root, commands)
+            self.appendMetadata(session_file, effort="ultra")
+            self.appendFailure(
+                session_file,
+                "turn-sol-ultra-capacity",
+                error={"message": "Selected model is at capacity", "codex_error_info": "server_overloaded"},
+            )
+            watcher.scan()
             self.assertEqual(len(commands), 1)
             self.assertIn("gpt-5.6-terra", commands[0].command)
-            self.assertEqual(requests, [])
+            self.assertIn('model_reasoning_effort="ultra"', commands[0].command)
+
+    def test_overloaded_stream_disconnect_errors_trigger_capacity_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            session_root = root / "sessions"
+            session_root.mkdir()
+            session_file = session_root / "session.jsonl"
+            session_file.touch()
+            commands: list[FakeProcess] = []
+            watcher = self.makeWatcher(root, commands)
+            self.appendMetadata(session_file)
+            self.appendFailure(
+                session_file,
+                "turn-stream-overloaded",
+                error={
+                    "message": (
+                        "stream disconnected before completion: Our servers are currently overloaded. "
+                        "Please try again later."
+                    ),
+                    "codex_error_info": "other",
+                },
+            )
+            watcher.scan()
+            self.assertEqual(len(commands), 1)
+            self.assertIn("gpt-5.6-terra", commands[0].command)
+
+            self.appendTurnContext(session_file, "gpt-5.6-terra")
+            self.appendFailure(
+                session_file,
+                "turn-remote-compact-overloaded",
+                error={
+                    "message": (
+                        "Error running remote compact task: stream disconnected before completion: "
+                        "Our servers are currently overloaded. Please try again later."
+                    ),
+                    "codex_error_info": "other",
+                },
+            )
+            watcher.scan()
+            self.assertEqual(len(commands), 2)
+            self.assertIn("gpt-5.6-luna", commands[1].command)
+
+    def test_non_gpt56_capacity_only_continues_same_model(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            session_root = root / "sessions"
+            session_root.mkdir()
+            session_file = session_root / "session.jsonl"
+            session_file.touch()
+            commands: list[FakeProcess] = []
+            watcher = self.makeWatcher(root, commands)
+            self.appendMetadata(session_file, model="gpt-5.5")
+            self.appendFailure(
+                session_file,
+                "turn-gpt55-capacity",
+                error={"message": "Selected model is at capacity", "codex_error_info": "server_overloaded"},
+            )
+            watcher.scan()
+            self.assertEqual(len(commands), 1)
+            self.assertIn("gpt-5.5", commands[0].command)
+            self.assertNotIn("gpt-5.6-terra", commands[0].command)
+            self.assertNotIn("gpt-5.6-luna", commands[0].command)
+
+    def test_remote_compact_bad_gateway_error_continues_current_model(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            session_root = root / "sessions"
+            session_root.mkdir()
+            session_file = session_root / "session.jsonl"
+            session_file.touch()
+            commands: list[FakeProcess] = []
+            watcher = self.makeWatcher(root, commands)
+            self.appendMetadata(session_file)
+            self.appendFailure(
+                session_file,
+                "turn-remote-compact-bad-gateway",
+                error={
+                    "message": (
+                        "Error running remote compact task: unexpected status 502 Bad Gateway: "
+                        "Upstream service temporarily unavailable, url: http://127.0.0.1:4477/responses, "
+                        "request id: xxxxx"
+                    ),
+                    "codex_error_info": "other",
+                },
+            )
+            watcher.scan()
+            self.assertEqual(len(commands), 1)
+            self.assertIn("gpt-5.6-terra", commands[0].command)
+
+            self.appendTurnContext(session_file, "gpt-5.6-terra")
+            self.appendFailure(
+                session_file,
+                "turn-remote-compact-bad-gateway-2",
+                error={
+                    "message": (
+                        "Error running remote compact task: unexpected status 502 Bad Gateway: "
+                        "Upstream service temporarily unavailable, url: http://127.0.0.1:4477/responses, "
+                        "request id: xxxxx"
+                    ),
+                    "codex_error_info": "other",
+                },
+            )
+            watcher.scan()
+            self.assertEqual(len(commands), 2)
+            self.assertIn("gpt-5.6-luna", commands[1].command)
+
+    def test_corrupted_history_stops_auto_continue_and_notifies(self) -> None:
+        """密文水合失败应停止自动续跑并提示人工接管，不得进入重试队列。"""
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            session_root = root / "sessions"
+            session_root.mkdir()
+            session_file = session_root / "session.jsonl"
+            session_file.touch()
+            commands: list[FakeProcess] = []
+            watcher = self.makeWatcher(root, commands)
+            self.appendMetadata(session_file)
+            self.appendFailure(
+                session_file,
+                "turn-corrupted-history",
+                error={
+                    "message": (
+                        "stream disconnected before completion: The encrypted content for item "
+                        "amsg_01a14167-6378-77b0-8d62-6acadf4009cb could not be verified. Reason: "
+                        "encrypted content hydration failed: Encrypted content could not be decrypted or parsed."
+                    ),
+                    "codex_error_info": "other",
+                },
+            )
+            watcher.scan()
+            # 不产生任何续跑命令，也不排队重试。
+            self.assertEqual([], commands)
+            self.assertEqual([], watcher.state.get("pending_failures") or [])
+            session_state = watcher.state["sessions"][SESSION_ID]
+            self.assertEqual("corrupted_history", session_state.get("last_action"))
+            self.assertEqual("error", (session_state.get("last_notice") or {}).get("level"))
+            self.assertIn("密文损坏", str((session_state.get("last_notice") or {}).get("message") or ""))
+
+    def test_remote_compact_generic_bad_gateway_downgrades_after_wrapping(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            session_root = root / "sessions"
+            session_root.mkdir()
+            session_file = session_root / "session.jsonl"
+            session_file.touch()
+            commands: list[FakeProcess] = []
+            watcher = self.makeWatcher(root, commands)
+            self.appendMetadata(session_file)
+            self.appendFailure(
+                session_file,
+                "turn-remote-compact-generic-bad-gateway",
+                error={
+                    "message": (
+                        "Error running remote compact task:\n"
+                        "unexpected status 502 Bad Gateway, url: http://127.0.0.1:4477/responses"
+                    ),
+                    "codex_error_info": "other",
+                },
+            )
+            watcher.scan()
+            self.assertEqual(len(commands), 1)
+            self.assertIn("gpt-5.6-terra", commands[0].command)
+
+    def test_foreground_not_ready_retries_without_background_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            session_root = root / "sessions"
+            session_root.mkdir()
+            session_file = session_root / "session.jsonl"
+            session_file.touch()
+            commands: list[FakeProcess] = []
+            requests: list[dict[str, Any]] = []
+            clock = [100.0]
+
+            def foreground_adapter(request: dict[str, Any]) -> dict[str, Any]:
+                requests.append(request)
+                if len(requests) == 1:
+                    return {"status": "observe_only", "reason": "prompt_not_ready"}
+                return {"status": "injected", "block_id": "block-1"}
+
+            watcher = self.makeWatcher(
+                root,
+                commands,
+                foreground_adapter=foreground_adapter,
+                time_fn=lambda: clock[0],
+            )
+            self.appendMetadata(session_file)
+            self.appendFailure(session_file, "turn-foreground-wait")
+            watcher.scan()
+            self.assertEqual(commands, [])
+            self.assertEqual(watcher.state["sessions"][SESSION_ID]["last_action"], "foreground_retry_pending")
+            self.assertEqual(watcher.state["pending_failures"][0]["mode"], "foreground")
+
+            clock[0] += 2.0
+            watcher.scan()
+            self.assertEqual(commands, [])
+            self.assertEqual(len(requests), 2)
+            self.assertEqual(watcher.state["pending_failures"], [])
+            self.assertEqual(watcher.state["sessions"][SESSION_ID]["last_action"], "foreground_continued")
+
+    def test_prune_drops_legacy_zombie_pending_failures(self) -> None:
+        """旧版遗留的高重试 pending 在启动时清理，避免僵尸重试。"""
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            state_path = root / "state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "initialized": True,
+                        "files": {},
+                        "sessions": {},
+                        "pending_failures": [
+                            {"session_id": SESSION_ID, "turn_id": "turn-old", "mode": "foreground", "retry_count": 50000},
+                            {"session_id": "other", "turn_id": "turn-fresh", "mode": "foreground", "retry_count": 2},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            watcher = SessionAutoContinue(state_path=state_path, allow_background_fallback=False)
+            remaining = watcher.state["pending_failures"]
+            self.assertEqual(len(remaining), 1)
+            self.assertEqual(remaining[0]["turn_id"], "turn-fresh")
+            self.assertIn("queued_at", remaining[0])
+
+    def test_pending_expires_without_injection(self) -> None:
+        """等待超过上限仍未注入成功的项被丢弃，不再无限重试。"""
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            session_root = root / "sessions"
+            session_root.mkdir()
+            session_file = session_root / "session.jsonl"
+            session_file.touch()
+            commands: list[FakeProcess] = []
+            clock = [100.0]
+            watcher = self.makeWatcher(
+                root,
+                commands,
+                foreground_adapter=lambda request: {"status": "observe_only", "reason": "prompt_not_ready"},
+                time_fn=lambda: clock[0],
+            )
+            watcher.pending_max_age_seconds = 60.0
+            self.appendMetadata(session_file)
+            self.appendFailure(session_file, "turn-wait")
+            watcher.scan()
+            self.assertEqual(len(watcher.state["pending_failures"]), 1)
+
+            clock[0] += 120.0
+            watcher.scan()
+            self.assertEqual(watcher.state["pending_failures"], [])
+
+    def test_recovered_session_is_not_injected(self) -> None:
+        """会话已有后续回合（tail=active）或已完成时，不注入、不排队，避免打扰正常对话。"""
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            session_root = root / "sessions"
+            session_root.mkdir()
+            session_file = session_root / "session.jsonl"
+            session_file.touch()
+            watcher = self.makeWatcher(root, [])
+            self.appendMetadata(session_file)
+            self.appendFailure(session_file, "turn-1")
+            # 会话在失败后已自行恢复：收到新的 task_started。
+            writeEvent(session_file, {"type": "task_started", "turn_id": "turn-2"})
+            watcher.scan()
+            self.assertEqual(watcher.state["pending_failures"], [])
+            self.assertEqual(watcher.state["sessions"][SESSION_ID]["last_action"], "foreground_skipped_active")
+
+    def test_completed_tail_pending_is_dropped_on_retry(self) -> None:
+        """失败后会话已完成成功回合时，重试轮询直接清理等待项。"""
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            session_root = root / "sessions"
+            session_root.mkdir()
+            session_file = session_root / "session.jsonl"
+            session_file.touch()
+            clock = [500.0]
+            watcher = self.makeWatcher(
+                root,
+                [],
+                foreground_adapter=lambda request: {"status": "observe_only", "reason": "prompt_not_ready"},
+                time_fn=lambda: clock[0],
+            )
+            self.appendMetadata(session_file)
+            self.appendFailure(session_file, "turn-1")
+            watcher.scan()
+            self.assertEqual(len(watcher.state["pending_failures"]), 1)
+            # 用户手动恢复并成功完成。
+            writeEvent(session_file, {"type": "task_started", "turn_id": "turn-2"})
+            writeEvent(session_file, {"type": "task_complete", "turn_id": "turn-2"})
+            clock[0] += 3.0
+            watcher.scan()
+            self.assertEqual(watcher.state["pending_failures"], [])
 
     def test_luna_capacity_failure_requests_force_continue(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
@@ -454,7 +802,7 @@ class SessionAutoContinueTest(unittest.TestCase):
                 feishu_notify=True,
                 notification_sender=notifications.append,
             )
-            self.appendMetadata(session_file)
+            self.appendMetadata(session_file, originator="codex_exec")
             self.appendFailure(session_file, "turn-background-notify")
             watcher.scan()
             self.assertEqual(len(commands), 1)
@@ -642,7 +990,7 @@ class SessionAutoContinueTest(unittest.TestCase):
                 commands,
                 foreground_adapter=lambda _request: {"status": "failed", "reason": "transport_failed"},
             )
-            self.appendMetadata(session_file)
+            self.appendMetadata(session_file, originator="codex_exec")
             self.appendFailure(session_file, "turn-fallback")
             watcher.scan()
             self.assertEqual(len(commands), 1)
@@ -789,3 +1137,42 @@ class SessionAutoContinueTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-30 用户规则：本地开发任务进度绝不发群，只私聊；且禁止 --as user
+# ---------------------------------------------------------------------------
+
+
+class TestFeishuTargetGuard(unittest.TestCase):
+    """发送前的 fail-closed 校验。
+
+    本模块通知的是本地 Codex 会话续跑摘要（会话 id/模型/turn/尝试次数），
+    按用户规则属于「本地开发任务进度」→ 只能私聊给用户本人。
+    """
+
+    def test_retired_chat_id_rejected(self):
+        from model_fallback_proxy.session_auto_continue import validateFeishuTarget
+        with self.assertRaisesRegex(RuntimeError, "已废弃"):
+            validateFeishuTarget("oc_ad0ce14872c54651650f770632530f24", "bot")
+
+    def test_empty_target_rejected(self):
+        from model_fallback_proxy.session_auto_continue import validateFeishuTarget
+        with self.assertRaisesRegex(RuntimeError, "未配置"):
+            validateFeishuTarget("", "bot")
+
+    def test_user_identity_rejected(self):
+        from model_fallback_proxy.session_auto_continue import validateFeishuTarget
+        with self.assertRaisesRegex(RuntimeError, "非机器人身份"):
+            validateFeishuTarget("oc_private", "user")
+
+    def test_valid_private_target_passes(self):
+        from model_fallback_proxy.session_auto_continue import validateFeishuTarget
+        self.assertEqual(validateFeishuTarget("oc_private", "bot"), "oc_private")
+
+    def test_configured_user_identity_falls_back_to_bot(self):
+        """配置里写 user 也要被强制改回 bot。"""
+
+        from model_fallback_proxy.session_auto_continue import SessionAutoContinue
+        cfg = SessionAutoContinue(feishu_notify=False, feishu_as="user")
+        self.assertEqual(cfg.feishu_as, "bot")

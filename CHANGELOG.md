@@ -4,6 +4,58 @@
 
 **继续工程师（JXG / Continue Engineer）**：容量不够自动换档，失败自动重试，前台自动续上。
 
+## 0.5.9 - 2026-10-16
+
+- 新增「会话历史密文损坏」熔断：服务端 hydration 失败（`encrypted content ... could not be verified`）
+  属不可恢复故障，`handleFailure` 不再无差别重试（实测旧行为对 PM 会话重试 61 次），
+  直接停止自动续跑、置 `last_action=corrupted_history` 并提示人工接管（开新会话 / 先 /compact）。
+- `error_classification.py` 新增 `isCorruptedHistoryError`：只匹配 hydration 明确特征，
+  不误伤通用 400002（input.type/tool.type）与容量类错误。
+- 测试 +2：分类器单元测试（真/假阳性边界）+ 守护集成测试（不产生续跑命令、不排队、发 error 提示）；
+  全量 75 tests PASS，仓库质量门禁 PASS。
+
+## 0.5.8 - 2026-10-09
+
+- 修复前台“继续”自 2026-09-30 起完全无法注入的问题（实测注入成功率归零、71 个任务积压）：
+  - `wsh` 解析兼容 systemd 服务环境：优先目标终端 `WAVETERM_WSHBINDIR`、`~/.local/share/waveterm/bin/wsh`，不再依赖服务 PATH。
+  - 就绪判定兼容新版 TUI 的 `› Ask Codex to do anything` 占位提示符；通过“运行态指示行”区分工作/空闲。
+  - 会话→终端块定位新增 `/proc` 文件句柄兜底（shell snapshot 缺失时仍可定位）。
+  - 回显截取窗口从 1600 提升到 4000 字符，避免忙碌标志行被长行截断后漏判。
+- 新增“不影响正常对话”安全门：注入前检查会话尾部状态，仅 `awaiting`（失败待恢复）允许注入；
+  `active`（回合进行中）/`completed`/`manual`/`unknown` 一律跳过；长回合中 `task_started`
+  滑出扫描窗口时按文件写入时间兜底判为 `active`；忙碌终端、输入框草稿、审批界面不注入。
+- 新增僵尸清理：等待注入超过 `CODEX_AUTO_CONTINUE_PENDING_MAX_AGE`（默认 6 小时）自动放弃；
+  启动时清理重试 ≥1000 次的历史遗留项（本次清掉 71 条）。
+- 修复 `buildCandidates` 忽略显式传入模型链的问题；同步对齐 09-19 换链后的测试断言（73 tests PASS）。
+
+## 0.5.7 - 2026-08-16
+
+- 统一错误归一化，终端换行或嵌套错误字段不会漏判。
+- 远程 compact 遇到通用 502 Bad Gateway、429/503/529、Bad Gateway 或 Upstream service temporarily unavailable 时，自动进入换档与“继续”流程。
+- 仅远程 compact 的可恢复上游故障进入换档；普通失败仍按既有逻辑直接续跑。
+
+## 0.5.6 - 2026-08-13
+
+- 识别远程 compact 的 `502 Bad Gateway: Upstream service temporarily unavailable` 错误。
+- 该错误自动进入 `gpt-5.6` 换档和前台“继续”流程；其它模型保持原模型继续。
+
+## 0.5.5 - 2026-08-12
+
+- 识别 `stream disconnected before completion: An error occurred while processing your request` 服务端瞬时错误。
+- 该错误与其它可恢复容量错误统一进入自动换档和前台“继续”流程。
+
+## 0.5.4 - 2026-08-12
+
+- 识别“stream disconnected before completion: Our servers are currently overloaded”及远程 compact 同类错误。
+- 代理请求自动重试下一档 `gpt-5.6` 模型；watcher 按现有前台策略自动发送“继续”。
+- 非 `gpt-5.6` 模型仍不切换，仅继续当前会话。
+
+## 0.5.3 - 2026-08-10
+
+- 修复容量降级强制启动后台 `codex exec resume` 导致的 `thread-store conflict`。
+- Codex TUI 容量失败统一通过当前前台输入“继续”；提示未就绪时持久化排队并延迟重试。
+- 后台 resume 兜底默认关闭，避免隐藏进程抢占用户交互；仅非交互会话显式开启时使用。
+
 ## 0.5.2 - 2026-08-07
 
 - 同一会话 30 秒内连续成功发送 3 次“继续”后，延迟 30 秒再发送下一次。

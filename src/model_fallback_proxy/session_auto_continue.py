@@ -13,6 +13,21 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+try:
+    from .error_classification import (
+        CAPACITY_MARKERS,
+        getRetryableModelFailureKind,
+        isCapacityText,
+        isCorruptedHistoryError,
+    )
+except ImportError:  # pragma: no cover - 兼容直接执行源码文件。
+    from error_classification import (
+        CAPACITY_MARKERS,
+        getRetryableModelFailureKind,
+        isCapacityText,
+        isCorruptedHistoryError,
+    )
+
 
 DEFAULT_SESSION_ROOT = Path.home() / ".codex" / "sessions"
 DEFAULT_STATE_PATH = Path.home() / ".local" / "state" / "codex-session-auto-continue" / "state.json"
@@ -21,18 +36,59 @@ DEFAULT_EVENTS_PATH = Path.home() / ".local" / "state" / "codex-session-auto-con
 DEFAULT_CODEX_BIN = Path(shutil.which("codex") or "codex")
 DEFAULT_PROMPT = "继续"
 DEFAULT_REASONING_EFFORT = "xhigh"
-DEFAULT_BACKGROUND_FALLBACK = True
+DEFAULT_BACKGROUND_FALLBACK = False
 DEFAULT_NOTIFICATION_CHANNEL = "local"
 DEFAULT_LINUX_NOTIFY = True
 DEFAULT_NOTIFY_BIN = Path("notify-send")
 DEFAULT_FEISHU_CHAT_ID = ""
 DEFAULT_FEISHU_AS = "bot"
+# 已废弃的通知目标：即使有人把它写进 env / CLI，也拒绝发送。
+# 「Agent 通知群」被用户判为私人信息集散地（2026-10-29 明令废弃）。
+# 保留为常量而不是删掉，是为了给出「你配的是废弃群」这种可行动的报错，
+# 而不是让消息静默发进一个用户看不到的会话。
+RETIRED_FEISHU_CHAT_IDS = frozenset({
+    "oc_ad0ce14872c54651650f770632530f24",  # Agent 通知群（已废弃）
+})
 DEFAULT_LARK_CLI = Path("lark-cli")
 LOCAL_NOTIFY_TIMEOUT_SECONDS = 5
 FEISHU_NOTIFY_TIMEOUT_SECONDS = 15
 DEFAULT_NOTIFY_INTERVAL_SECONDS = 600.0
 # 旧名称保留，避免外部调用方导入常量时失效。
 DEFAULT_FEISHU_NOTIFY_INTERVAL_SECONDS = DEFAULT_NOTIFY_INTERVAL_SECONDS
+
+
+def validateFeishuTarget(chat_id: str, as_identity: str) -> str:
+    """校验飞书通知目标，返回规范化后的 chat_id；不合规即抛错（fail-closed）。
+
+    为什么必须在发送前硬校验，而不是靠默认值「大概对」：
+
+    1. **目标必须显式配置**。本模块通知的是本地 Codex 会话续跑摘要
+       （会话 id、模型、turn、尝试次数）—— 按用户规则（2026-10-30）属于
+       「本地开发任务进度」，**只允许私聊给用户本人，绝不发群**。
+    2. **废弃目标直接拒绝**并给出可行动报错，而不是静默发进一个用户看不到的会话。
+    3. **身份必须是 bot**。`--as user` 会让消息以用户本人名义发出，
+       收件方看到用户自言自语，审计也分不清是谁发的。
+    """
+
+    target = str(chat_id or "").strip()
+    identity = str(as_identity or "").strip().lower()
+    if identity != "bot":
+        raise RuntimeError(
+            f"拒绝以非机器人身份发送飞书通知：--as {identity or '(空)'}；"
+            "用户规则要求一律 --as bot"
+        )
+    if not target:
+        raise RuntimeError(
+            "未配置飞书通知目标（chat_id 为空）。本地开发任务进度只允许私聊，"
+            "请显式设置 CODEX_AUTO_CONTINUE_FEISHU_CHAT_ID 为你的私聊会话 id；"
+            "不要依赖默认值，也不要发群"
+        )
+    if target in RETIRED_FEISHU_CHAT_IDS:
+        raise RuntimeError(
+            f"拒绝对已废弃的通知目标发送：{target}（Agent 通知群，已被用户废弃）。"
+            "本地开发任务进度只允许私聊给用户本人，请改用你的私聊会话 id"
+        )
+    return target
 FEISHU_NOTIFY_RETRY_SECONDS = 60.0
 MAX_NOTIFICATION_ITEMS = 256
 MAX_FEISHU_NOTIFICATION_ITEMS = MAX_NOTIFICATION_ITEMS
@@ -42,23 +98,39 @@ MAX_HANDLED_TURNS = 64
 CONTINUE_BURST_WINDOW_SECONDS = 30.0
 CONTINUE_BURST_LIMIT = 3
 CONTINUE_PAUSE_SECONDS = 30.0
+FOREGROUND_RETRY_DELAYS_SECONDS = (2.0, 5.0, 10.0, 30.0, 60.0)
+# 自动续跑等待上限：超过该窗口仍未注入成功则放弃，避免僵尸重试与误注入。
+DEFAULT_PENDING_MAX_AGE_SECONDS = 21600.0
+# 历史遗留项没有 queued_at，重试次数失控即按僵尸处理（正常项 6 小时内到不了 1000 次）。
+LEGACY_PENDING_RETRY_THRESHOLD = 1000
+SESSION_TAIL_SCAN_BYTES = 262144
+# 会话文件在此窗口内仍有写入即视为回合进行中（用于长回合的保守判定）。
+ACTIVE_MTIME_WINDOW_SECONDS = 120.0
+FOREGROUND_RETRYABLE_REASONS = {
+    "target_not_unique",
+    "prompt_not_ready",
+    "prompt_not_stable",
+    "transport_failed",
+    "retry_deferred",
+}
 # codex_exec 是 RoadClaw/虚拟员工常用入口；未配置虚拟员工 hook 时仍只观察。
 WATCHED_ORIGINATORS = {"codex-tui", "codex_exec", "virtual_employee", "roadclaw"}
-MODEL_CHAIN = (
-    "gpt-5.6-sol",
-    "gpt-5.6-terra",
-    "gpt-5.6-luna",
-)
-LEGACY_MODEL_ALIASES = {"gpt-5.5": "gpt-5.6-luna"}
-CAPACITY_MARKERS = (
-    "selected model is at capacity",
-    "model is at capacity",
-    "server_overloaded",
-    "server overloaded",
-    "no available accounts",
-    "capacity exceeded",
-    "capacity_exceeded",
-)
+
+
+MODEL_POLICY_PATH = Path.home() / ".codex" / "model_policy.json"
+
+
+def _loadModelPolicy() -> dict[str, Any]:
+    """读取统一模型策略；缺失或损坏时返回空字典，由调用方兜底。"""
+    try:
+        return json.loads(MODEL_POLICY_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+_MODEL_POLICY = _loadModelPolicy()
+PRIMARY_MODEL = str(_MODEL_POLICY.get("primary") or "deepseek-v4-flash")
+MODEL_CHAIN = tuple(_MODEL_POLICY.get("fallback") or [PRIMARY_MODEL])
 MANUAL_TERMINATION_MARKERS = (
     "user aborted",
     "user_aborted",
@@ -92,24 +164,29 @@ def isManualTermination(error: Any) -> bool:
 
 
 def isCapacityError(error: Any) -> bool:
-    if not error:
-        return False
-    if isinstance(error, dict):
-        text = " ".join(str(value) for value in error.values())
-    else:
-        text = str(error)
-    normalized = text.lower()
-    return any(marker in normalized for marker in CAPACITY_MARKERS)
+    return isCapacityText(error)
+
+
+def getRetryableFailureKind(error: Any) -> str:
+    """返回可换档瞬时故障类型；空串表示只按普通失败续跑。"""
+    return getRetryableModelFailureKind(error)
 
 
 def isFailureEvent(payload: dict[str, Any]) -> bool:
     return payload.get("type") == "task_complete" and bool(payload.get("error")) and not isManualTermination(payload.get("error"))
 
 
+def isGpt56Model(model: str) -> bool:
+    """模型是否在策略链内（链由 model_policy.json 动态配置）。"""
+    return str(model or "").strip() in MODEL_CHAIN
+
+
 def getNextModel(model: str) -> str:
-    current_model = LEGACY_MODEL_ALIASES.get(str(model or "").strip(), str(model or "").strip())
+    current_model = str(model or "").strip()
     if not current_model:
         return MODEL_CHAIN[0]
+    if not isGpt56Model(current_model):
+        return current_model
     try:
         current_index = MODEL_CHAIN.index(current_model)
     except ValueError:
@@ -119,8 +196,10 @@ def getNextModel(model: str) -> str:
     return current_model
 
 
-def getReasoningEffort(_file_state: dict[str, Any]) -> str:
-    return DEFAULT_REASONING_EFFORT
+def getReasoningEffort(file_state: dict[str, Any]) -> str:
+    """沿用会话实际档位；历史事件缺失时才使用默认档位。"""
+    effort = str(file_state.get("reasoning_effort") or "").strip()
+    return effort or DEFAULT_REASONING_EFFORT
 
 
 def isEnabled(value: str | None) -> bool:
@@ -132,6 +211,11 @@ def getFloatEnv(name: str, default: float) -> float:
         return float(os.environ.get(name, str(default)))
     except (TypeError, ValueError):
         return default
+
+
+def getPendingMaxAgeSeconds() -> float:
+    """等待注入的最长时间；可用环境变量覆盖，避免僵尸重试或误注入旧会话。"""
+    return getFloatEnv("CODEX_AUTO_CONTINUE_PENDING_MAX_AGE", DEFAULT_PENDING_MAX_AGE_SECONDS)
 
 
 def getNotificationChannel(value: str | None) -> str:
@@ -183,6 +267,7 @@ class SessionAutoContinue:
         notification_channel: str | None = None,
         linux_notify: bool | None = None,
         notify_bin: Path | str | None = None,
+        pending_max_age_seconds: float = DEFAULT_PENDING_MAX_AGE_SECONDS,
     ) -> None:
         self.session_root = session_root
         self.state_path = state_path
@@ -213,7 +298,10 @@ class SessionAutoContinue:
         self.feishu_as = str(
             feishu_as or os.environ.get("CODEX_AUTO_CONTINUE_FEISHU_AS", DEFAULT_FEISHU_AS)
         ).strip().lower()
-        if self.feishu_as not in {"bot", "user"}:
+        # 用户规则（2026-10-30）：禁止用用户飞书身份（--as user）发消息。
+        # 原实现允许 "user"，会让本地 Codex 会话续跑摘要以**用户本人名义**发出 ——
+        # 收件方看到用户自言自语，审计也分不清是谁发的。非法值一律回落 bot。
+        if self.feishu_as != "bot":
             self.feishu_as = DEFAULT_FEISHU_AS
         self.notification_interval_seconds = max(
             1.0,
@@ -223,10 +311,15 @@ class SessionAutoContinue:
                 else getNotificationInterval()
             ),
         )
+        effective_pending_age = pending_max_age_seconds
+        if effective_pending_age == DEFAULT_PENDING_MAX_AGE_SECONDS:
+            effective_pending_age = getPendingMaxAgeSeconds()
+        self.pending_max_age_seconds = max(60.0, float(effective_pending_age))
         self.notification_sender = notification_sender or self.selectNotificationSender()
         self.state = self.loadState()
         if not self.allow_background_fallback:
             self.migrateToForegroundOnly()
+        self.pruneStalePendingFailures()
         self.processes: dict[str, subprocess.Popen[str]] = {}
 
     def resolveNotificationChannel(
@@ -291,8 +384,16 @@ class SessionAutoContinue:
 
     def migrateToForegroundOnly(self) -> None:
         """清除旧后台续跑状态，避免迁移后旧 PID 阻塞前台交互。"""
-        changed = bool(self.state.get("pending_failures"))
-        self.state["pending_failures"] = []
+        pending = self.state.get("pending_failures")
+        if not isinstance(pending, list):
+            pending = []
+        foreground_pending = [
+            item
+            for item in pending
+            if isinstance(item, dict) and str(item.get("mode") or "") == "foreground"
+        ]
+        changed = len(foreground_pending) != len(pending)
+        self.state["pending_failures"] = foreground_pending
         for session in self.state.get("sessions", {}).values():
             if not isinstance(session, dict):
                 continue
@@ -303,6 +404,38 @@ class SessionAutoContinue:
                 changed = True
         if changed:
             self.saveState()
+
+    def pruneStalePendingFailures(self, now: float | None = None) -> int:
+        """丢弃过旧或重试次数失控的等待项，避免僵尸重试与对历史会话的误注入。"""
+        pending = self.state.get("pending_failures")
+        if not isinstance(pending, list) or not pending:
+            return 0
+        now = self.time_fn() if now is None else now
+        kept: list[dict[str, Any]] = []
+        dropped = 0
+        changed = False
+        for item in pending:
+            if not isinstance(item, dict):
+                dropped += 1
+                continue
+            retry_count = int(item.get("retry_count") or 0)
+            queued_at = float(item.get("queued_at") or item.get("not_before") or 0.0)
+            if retry_count >= LEGACY_PENDING_RETRY_THRESHOLD:
+                dropped += 1
+                continue
+            if queued_at and now - queued_at > self.pending_max_age_seconds:
+                dropped += 1
+                continue
+            if "queued_at" not in item:
+                # 旧版状态没有排队时间；补上当前时间，给出一个明确的等待期限。
+                item["queued_at"] = now
+                changed = True
+            kept.append(item)
+        if dropped or changed:
+            self.state["pending_failures"] = kept
+            logging.info("auto-continue dropped stale pending failures=%d", dropped)
+            self.saveState()
+        return dropped
 
     def saveState(self) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -466,6 +599,67 @@ class SessionAutoContinue:
         except OSError:
             return False
         return True
+
+    def getSessionTailState(self, session_id: str) -> str:
+        """从会话文件尾部恢复当前状态：awaiting/active/completed/manual/unknown。
+
+        仅 awaiting（失败后等待恢复）允许注入“继续”；active（回合进行中）
+        与 completed（已恢复或正常完成）都必须放弃注入，避免打扰正常对话。
+        """
+        path: Path | None = None
+        for key, file_state in (self.state.get("files") or {}).items():
+            if isinstance(file_state, dict) and str(file_state.get("session_id") or "") == session_id:
+                path = Path(key)
+                break
+        if path is None or not path.exists():
+            # 状态表缺少条目时按会话根目录兜底查找最新文件。
+            try:
+                matches = sorted(
+                    self.session_root.rglob(f"*{session_id}*.jsonl"),
+                    key=lambda item: item.stat().st_mtime,
+                    reverse=True,
+                )
+            except OSError:
+                matches = []
+            path = matches[0] if matches else None
+        if path is None or not path.exists():
+            return "unknown"
+        try:
+            with path.open("rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                size = handle.tell()
+                handle.seek(max(0, size - SESSION_TAIL_SCAN_BYTES))
+                content = handle.read()
+        except OSError:
+            return "unknown"
+        for raw_line in reversed(content.splitlines()):
+            if not raw_line.strip():
+                continue
+            try:
+                event = json.loads(raw_line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            payload = event.get("payload") if isinstance(event, dict) else None
+            if not isinstance(payload, dict):
+                continue
+            event_type = str(payload.get("type") or "")
+            if event_type == "task_complete":
+                error = payload.get("error")
+                if error and not isManualTermination(error):
+                    return "awaiting"
+                return "completed"
+            if event_type == "turn_aborted":
+                return "manual"
+            if event_type == "task_started":
+                return "active"
+        # 窗口内没有任务边界事件：回合很长时 task_started 早已滑出窗口。
+        # 文件仍在持续写入（mtime 很新）说明回合进行中，保守判为 active 不注入。
+        try:
+            if self.time_fn() - path.stat().st_mtime <= ACTIVE_MTIME_WINDOW_SECONDS:
+                return "active"
+        except OSError:
+            pass
+        return "unknown"
 
     def reapProcesses(self) -> None:
         for session_id, process in list(self.processes.items()):
@@ -683,6 +877,9 @@ class SessionAutoContinue:
             separators=(",", ":"),
         )
         idempotency_key = "cac-" + hashlib.sha1(idempotency_seed.encode("utf-8")).hexdigest()[:24]
+        # fail-closed 校验（2026-10-30 用户规则）：目标为空 / 是已废弃群 /
+        # 身份不是 bot 时直接抛错，绝不「发了再说」。见 validateFeishuTarget。
+        target = validateFeishuTarget(self.feishu_chat_id, self.feishu_as)
         result = subprocess.run(
             [
                 lark_cli,
@@ -691,7 +888,7 @@ class SessionAutoContinue:
                 "--as",
                 self.feishu_as,
                 "--chat-id",
-                self.feishu_chat_id,
+                target,
                 "--text",
                 message,
                 "--idempotency-key",
@@ -801,7 +998,8 @@ class SessionAutoContinue:
             "model": model,
             "reasoning_effort": reasoning_effort,
             "force_continue": bool(
-                isCapacityError(payload.get("error")) and model == MODEL_CHAIN[-1]
+                getRetryableFailureKind(payload.get("error"))
+                and (not isGpt56Model(model) or model == MODEL_CHAIN[-1])
             ),
         }
         if isinstance(file_state.get("virtual_employee"), dict):
@@ -846,16 +1044,35 @@ class SessionAutoContinue:
             if not_before > now:
                 remaining.append(item)
                 continue
+            # 等待过久仍未注入成功的项直接放弃，避免僵尸重试。
+            queued_at = float(item.get("queued_at") or 0.0)
+            if queued_at and now - queued_at > self.pending_max_age_seconds:
+                logging.info(
+                    "auto-continue dropped aged pending failure session=%s turn=%s age=%.0fs",
+                    session_id,
+                    item.get("turn_id"),
+                    now - queued_at,
+                )
+                continue
+            if str(item.get("mode") or "") == "foreground":
+                if self.isSessionActive(session_id):
+                    remaining.append(item)
+                    continue
+                _completed, retry_item = self.retryForegroundFailure(item, now)
+                if retry_item is not None:
+                    remaining.append(retry_item)
+                continue
             if self.isSessionActive(session_id):
                 remaining.append(item)
                 continue
             file_state = {
                 "session_id": session_id,
                 "watch": True,
-                "model": str(item.get("model") or "gpt-5.6-sol"),
+                "model": str(item.get("model") or PRIMARY_MODEL),
                 "reasoning_effort": str(item.get("reasoning_effort") or "").strip(),
                 "cwd": str(item.get("cwd") or Path.home()),
                 "frontend_channel": str(item.get("frontend_channel") or ""),
+                "originator": str(item.get("originator") or ""),
             }
             if isinstance(item.get("virtual_employee"), dict):
                 file_state["virtual_employee"] = dict(item["virtual_employee"])
@@ -869,6 +1086,8 @@ class SessionAutoContinue:
         file_state: dict[str, Any],
         payload: dict[str, Any],
         not_before: float | None = None,
+        mode: str = "background",
+        retry_count: int = 0,
     ) -> None:
         session_id = str(file_state.get("session_id") or "").strip()
         turn_id = str(payload.get("turn_id") or "").strip()
@@ -889,12 +1108,110 @@ class SessionAutoContinue:
             "reasoning_effort": file_state.get("reasoning_effort"),
             "cwd": file_state.get("cwd"),
             "frontend_channel": file_state.get("frontend_channel"),
+            "originator": file_state.get("originator"),
             "virtual_employee": file_state.get("virtual_employee"),
             "payload": payload,
+            "queued_at": self.time_fn(),
         }
+        if mode != "background":
+            item["mode"] = mode
+        if retry_count:
+            item["retry_count"] = int(retry_count)
         if not_before is not None:
             item["not_before"] = float(not_before)
         pending.append(item)
+
+    @staticmethod
+    def isInteractiveSession(file_state: dict[str, Any]) -> bool:
+        """仅把 Codex TUI 前台会话交给可见输入通道，避免后台抢占线程。"""
+        originator = str(file_state.get("originator") or "").strip().lower()
+        channel = str(file_state.get("frontend_channel") or "").strip().lower()
+        return originator == "codex-tui" or channel in {"auto", "waveterm", "terminal"}
+
+    def shouldRetryForeground(
+        self,
+        file_state: dict[str, Any],
+        foreground_result: dict[str, Any],
+    ) -> bool:
+        if not self.isInteractiveSession(file_state):
+            return False
+        status = str(foreground_result.get("status") or "").strip().lower()
+        reason = str(foreground_result.get("reason") or "").strip().lower()
+        return status in {"observe_only", "failed"} and reason in FOREGROUND_RETRYABLE_REASONS
+
+    def retryForegroundFailure(
+        self,
+        item: dict[str, Any],
+        now: float,
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """重试前台注入；目标仍在工作时只延迟，不创建隐藏 resume。"""
+        session_id = str(item.get("session_id") or "").strip()
+        turn_id = str(item.get("turn_id") or "").strip()
+        payload = item.get("payload")
+        if not session_id or not turn_id or not isinstance(payload, dict):
+            return False, None
+        file_state = {
+            "session_id": session_id,
+            "watch": True,
+            "originator": str(item.get("originator") or "codex-tui"),
+            "model": str(item.get("model") or MODEL_CHAIN[0]),
+            "reasoning_effort": str(item.get("reasoning_effort") or "").strip(),
+            "cwd": str(item.get("cwd") or Path.home()),
+            "frontend_channel": str(item.get("frontend_channel") or "auto"),
+        }
+        if isinstance(item.get("virtual_employee"), dict):
+            file_state["virtual_employee"] = dict(item["virtual_employee"])
+        # 仅当会话尾部仍处于“失败待恢复”时才注入；任何其它状态都跳过，避免打扰正常对话。
+        tail_state = self.getSessionTailState(session_id)
+        if tail_state != "awaiting":
+            session = self.getSessionState(session_id)
+            session["last_action"] = f"foreground_skipped_{tail_state}"
+            logging.info(
+                "auto-continue skipped injection session=%s turn=%s tail_state=%s",
+                session_id,
+                turn_id,
+                tail_state,
+            )
+            return False, None
+        result = self.tryForegroundResume(
+            session_id,
+            turn_id,
+            file_state,
+            payload,
+            str(file_state["model"]),
+            str(file_state["reasoning_effort"]),
+        )
+        session = self.getSessionState(session_id)
+        session["foreground"] = result
+        status = str(result.get("status") or "").strip().lower()
+        if status in {"injected", "confirmed"}:
+            session["last_action"] = "foreground_continued"
+            self.emitNotice(session_id, turn_id, f"前台适配器已发送“继续”（{status}）。", "info")
+            self.notifySuccess(session_id, turn_id, str(file_state["model"]), "foreground")
+            return True, None
+        reason = str(result.get("reason") or "").strip().lower()
+        if reason not in FOREGROUND_RETRYABLE_REASONS:
+            session["last_action"] = "foreground_" + (status or "unavailable")
+            self.emitNotice(
+                session_id,
+                turn_id,
+                f"前台适配器未注入（{reason or status or 'unknown'}），保留人工接管。",
+                "warning",
+            )
+            return False, None
+        retry_count = int(item.get("retry_count") or 0) + 1
+        delay_index = min(retry_count - 1, len(FOREGROUND_RETRY_DELAYS_SECONDS) - 1)
+        item["retry_count"] = retry_count
+        item["not_before"] = now + FOREGROUND_RETRY_DELAYS_SECONDS[delay_index]
+        session["last_action"] = "foreground_retry_pending"
+        logging.info(
+            "auto-continue foreground retry pending session=%s turn=%s reason=%s retry=%d",
+            session_id,
+            turn_id,
+            reason or status or "unknown",
+            retry_count,
+        )
+        return False, item
 
     def handleFailure(self, file_state: dict[str, Any], payload: dict[str, Any], allow_pending: bool = True) -> None:
         session_id = str(file_state.get("session_id") or "").strip()
@@ -904,6 +1221,22 @@ class SessionAutoContinue:
         session = self.getSessionState(session_id)
         handled_turn_ids = [str(value) for value in session["handled_turn_ids"]]
         if turn_id in handled_turn_ids:
+            return
+        # 历史密文损坏：重试/换档/“继续”均无法恢复（服务端逐条 hydrate 失败），
+        # 直接放弃自动续跑并提示人工接管，避免 61 次僵尸重试放大故障。
+        if isCorruptedHistoryError(payload.get("error")):
+            handled_turn_ids.append(turn_id)
+            session["handled_turn_ids"] = handled_turn_ids[-MAX_HANDLED_TURNS:]
+            session["last_action"] = "corrupted_history"
+            session["last_failure_kind"] = "corrupted_history"
+            self.emitNotice(
+                session_id,
+                turn_id,
+                "检测到会话历史密文损坏（服务端无法解密历史条目），自动续跑已停止；"
+                "请开新会话接续任务，或在原会话执行 /compact 后再试。",
+                "error",
+            )
+            logging.warning("auto-continue corrupted history session=%s turn=%s", session_id, turn_id)
             return
         if self.isSessionActive(session_id):
             if allow_pending:
@@ -932,52 +1265,81 @@ class SessionAutoContinue:
         handled_turn_ids.append(turn_id)
         session["handled_turn_ids"] = handled_turn_ids[-MAX_HANDLED_TURNS:]
         current_model = str(file_state.get("model") or session.get("last_model") or MODEL_CHAIN[0]).strip() or MODEL_CHAIN[0]
-        current_model = LEGACY_MODEL_ALIASES.get(current_model, current_model)
         file_state["model"] = current_model
         reasoning_effort = getReasoningEffort(file_state)
-        capacity_failure = isCapacityError(payload.get("error"))
-        lowest_model_capacity_failure = bool(
-            capacity_failure and current_model == MODEL_CHAIN[-1]
+        retryable_failure_kind = getRetryableFailureKind(payload.get("error"))
+        retryable_model_failure = bool(retryable_failure_kind)
+        lowest_model_retryable_failure = bool(
+            retryable_model_failure and current_model == MODEL_CHAIN[-1]
         )
         resume_model = current_model
-        # 容量错误先沿链路下探；到最低档后继续重试，同时只保留有限历史。
-        if capacity_failure and current_model in MODEL_CHAIN and current_model != MODEL_CHAIN[-1]:
+        # 容量与远程 compact 的可恢复上游故障先沿链路下探；到最低档后继续重试。
+        if (
+            retryable_model_failure
+            and isGpt56Model(current_model)
+            and current_model in MODEL_CHAIN
+            and current_model != MODEL_CHAIN[-1]
+        ):
             resume_model = getNextModel(current_model)
             file_state["model"] = resume_model
-            session["last_failure_kind"] = "capacity"
+            session["last_failure_kind"] = retryable_failure_kind
             session["failure_times"] = []
-            notice_message = f"检测到模型容量不足，自动降级 {current_model} → {resume_model}，并发送“继续”。"
+            if retryable_failure_kind == "capacity":
+                notice_message = f"检测到模型容量不足，自动降级 {current_model} → {resume_model}，并发送“继续”。"
+            else:
+                notice_message = f"检测到远程 compact 上游瞬时故障，自动降级 {current_model} → {resume_model}，并发送“继续”。"
         else:
             failure_times = [float(value) for value in session["failure_times"] if float(value) >= now - FAILURE_WINDOW_SECONDS]
             failure_times.append(now)
             session["failure_times"] = failure_times[-FAILURE_HISTORY_LIMIT:]
-            session["last_failure_kind"] = "capacity" if capacity_failure else "other"
-            if capacity_failure:
-                if lowest_model_capacity_failure:
-                    notice_message = f"最低模型 {current_model} 仍容量不足，直接重试“继续”；不再降级或放弃。"
+            session["last_failure_kind"] = retryable_failure_kind or "other"
+            if retryable_model_failure:
+                if lowest_model_retryable_failure:
+                    notice_message = f"最低模型 {current_model} 仍遇到可恢复上游故障，直接重试“继续”；不再降级或放弃。"
                 else:
-                    notice_message = f"模型 {current_model} 容量不足，自动发送“继续”并持续重试。"
+                    notice_message = f"模型 {current_model} 遇到可恢复上游故障，自动发送“继续”并持续重试。"
             else:
                 notice_message = "检测到非手动失败，自动发送“继续”并持续重试。"
         session["last_model"] = resume_model
-        model_switch_required = bool(
-            capacity_failure
-            and current_model in MODEL_CHAIN
-            and resume_model != current_model
-        )
-        if model_switch_required:
-            # 前台只支持输入“继续”，不能改变当前 TUI 模型；降级必须走带 -m 的 resume。
-            foreground_result = {"status": "observe_only", "reason": "model_switch_requires_resume"}
-        else:
-            foreground_result = self.tryForegroundResume(
-                session_id, turn_id, file_state, payload, resume_model, reasoning_effort
+        # 容量降级也必须先走当前前台。请求层代理负责把下一次请求切到候选模型，
+        # watcher 不再用隐藏 codex exec resume 抢占原线程。
+        # 会话已恢复（后续回合在进行或已完成）时不再注入，避免打扰正常对话。
+        tail_state = self.getSessionTailState(session_id)
+        if tail_state in {"active", "completed", "manual"}:
+            session["last_action"] = f"foreground_skipped_{tail_state}"
+            logging.info(
+                "auto-continue skipped injection session=%s turn=%s tail_state=%s",
+                session_id,
+                turn_id,
+                tail_state,
             )
+            return
+        foreground_result = self.tryForegroundResume(
+            session_id, turn_id, file_state, payload, resume_model, reasoning_effort
+        )
         foreground_status = str(foreground_result.get("status") or "").strip().lower()
         if foreground_status in {"injected", "confirmed"}:
             session["last_action"] = "foreground_continued"
             session["foreground"] = foreground_result
             self.emitNotice(session_id, turn_id, f"前台适配器已发送“继续”（{foreground_status}）。", "info")
             self.notifySuccess(session_id, turn_id, resume_model, "foreground")
+            return
+        if self.shouldRetryForeground(file_state, foreground_result):
+            reason = str(foreground_result.get("reason") or foreground_status or "unknown")
+            self.queuePendingFailure(
+                file_state,
+                payload,
+                not_before=now + FOREGROUND_RETRY_DELAYS_SECONDS[0],
+                mode="foreground",
+            )
+            session["last_action"] = "foreground_retry_pending"
+            session["foreground"] = foreground_result
+            self.emitNotice(
+                session_id,
+                turn_id,
+                f"前台暂未可输入（{reason}），已排队等待，不启动后台 resume。",
+                "warning",
+            )
             return
         fallback_allowed = self.allow_background_fallback and foreground_status in {"observe_only", "failed"}
         if not fallback_allowed:
@@ -1011,7 +1373,7 @@ class SessionAutoContinue:
         session["active"] = {"pid": pid, "turn_id": turn_id, "started_at": now}
         session["last_action"] = "background_continued"
         session["foreground"] = foreground_result
-        self.emitNotice(session_id, turn_id, notice_message, "warning" if capacity_failure else "info")
+        self.emitNotice(session_id, turn_id, notice_message, "warning" if retryable_model_failure else "info")
         self.notifySuccess(session_id, turn_id, resume_model, "background_resume")
         logging.warning(
             "auto-continue sent prompt session=%s turn=%s model=%s reasoning_effort=%s",
@@ -1075,6 +1437,7 @@ class SessionAutoContinue:
                     self.handleEvent(file_state, payload)
             file_state["offset"] = offset + consumed
         self.reapProcesses()
+        self.pruneStalePendingFailures()
         self.flushSuccessNotifications()
         self.saveState()
 
