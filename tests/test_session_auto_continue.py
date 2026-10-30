@@ -1137,3 +1137,42 @@ class SessionAutoContinueTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-30 用户规则：本地开发任务进度绝不发群，只私聊；且禁止 --as user
+# ---------------------------------------------------------------------------
+
+
+class TestFeishuTargetGuard(unittest.TestCase):
+    """发送前的 fail-closed 校验。
+
+    本模块通知的是本地 Codex 会话续跑摘要（会话 id/模型/turn/尝试次数），
+    按用户规则属于「本地开发任务进度」→ 只能私聊给用户本人。
+    """
+
+    def test_retired_chat_id_rejected(self):
+        from model_fallback_proxy.session_auto_continue import validateFeishuTarget
+        with self.assertRaisesRegex(RuntimeError, "已废弃"):
+            validateFeishuTarget("oc_ad0ce14872c54651650f770632530f24", "bot")
+
+    def test_empty_target_rejected(self):
+        from model_fallback_proxy.session_auto_continue import validateFeishuTarget
+        with self.assertRaisesRegex(RuntimeError, "未配置"):
+            validateFeishuTarget("", "bot")
+
+    def test_user_identity_rejected(self):
+        from model_fallback_proxy.session_auto_continue import validateFeishuTarget
+        with self.assertRaisesRegex(RuntimeError, "非机器人身份"):
+            validateFeishuTarget("oc_private", "user")
+
+    def test_valid_private_target_passes(self):
+        from model_fallback_proxy.session_auto_continue import validateFeishuTarget
+        self.assertEqual(validateFeishuTarget("oc_private", "bot"), "oc_private")
+
+    def test_configured_user_identity_falls_back_to_bot(self):
+        """配置里写 user 也要被强制改回 bot。"""
+
+        from model_fallback_proxy.session_auto_continue import SessionAutoContinue
+        cfg = SessionAutoContinue(feishu_notify=False, feishu_as="user")
+        self.assertEqual(cfg.feishu_as, "bot")

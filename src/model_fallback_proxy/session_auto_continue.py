@@ -42,12 +42,53 @@ DEFAULT_LINUX_NOTIFY = True
 DEFAULT_NOTIFY_BIN = Path("notify-send")
 DEFAULT_FEISHU_CHAT_ID = ""
 DEFAULT_FEISHU_AS = "bot"
+# 已废弃的通知目标：即使有人把它写进 env / CLI，也拒绝发送。
+# 「Agent 通知群」被用户判为私人信息集散地（2026-10-29 明令废弃）。
+# 保留为常量而不是删掉，是为了给出「你配的是废弃群」这种可行动的报错，
+# 而不是让消息静默发进一个用户看不到的会话。
+RETIRED_FEISHU_CHAT_IDS = frozenset({
+    "oc_ad0ce14872c54651650f770632530f24",  # Agent 通知群（已废弃）
+})
 DEFAULT_LARK_CLI = Path("lark-cli")
 LOCAL_NOTIFY_TIMEOUT_SECONDS = 5
 FEISHU_NOTIFY_TIMEOUT_SECONDS = 15
 DEFAULT_NOTIFY_INTERVAL_SECONDS = 600.0
 # 旧名称保留，避免外部调用方导入常量时失效。
 DEFAULT_FEISHU_NOTIFY_INTERVAL_SECONDS = DEFAULT_NOTIFY_INTERVAL_SECONDS
+
+
+def validateFeishuTarget(chat_id: str, as_identity: str) -> str:
+    """校验飞书通知目标，返回规范化后的 chat_id；不合规即抛错（fail-closed）。
+
+    为什么必须在发送前硬校验，而不是靠默认值「大概对」：
+
+    1. **目标必须显式配置**。本模块通知的是本地 Codex 会话续跑摘要
+       （会话 id、模型、turn、尝试次数）—— 按用户规则（2026-10-30）属于
+       「本地开发任务进度」，**只允许私聊给用户本人，绝不发群**。
+    2. **废弃目标直接拒绝**并给出可行动报错，而不是静默发进一个用户看不到的会话。
+    3. **身份必须是 bot**。`--as user` 会让消息以用户本人名义发出，
+       收件方看到用户自言自语，审计也分不清是谁发的。
+    """
+
+    target = str(chat_id or "").strip()
+    identity = str(as_identity or "").strip().lower()
+    if identity != "bot":
+        raise RuntimeError(
+            f"拒绝以非机器人身份发送飞书通知：--as {identity or '(空)'}；"
+            "用户规则要求一律 --as bot"
+        )
+    if not target:
+        raise RuntimeError(
+            "未配置飞书通知目标（chat_id 为空）。本地开发任务进度只允许私聊，"
+            "请显式设置 CODEX_AUTO_CONTINUE_FEISHU_CHAT_ID 为你的私聊会话 id；"
+            "不要依赖默认值，也不要发群"
+        )
+    if target in RETIRED_FEISHU_CHAT_IDS:
+        raise RuntimeError(
+            f"拒绝对已废弃的通知目标发送：{target}（Agent 通知群，已被用户废弃）。"
+            "本地开发任务进度只允许私聊给用户本人，请改用你的私聊会话 id"
+        )
+    return target
 FEISHU_NOTIFY_RETRY_SECONDS = 60.0
 MAX_NOTIFICATION_ITEMS = 256
 MAX_FEISHU_NOTIFICATION_ITEMS = MAX_NOTIFICATION_ITEMS
@@ -257,7 +298,10 @@ class SessionAutoContinue:
         self.feishu_as = str(
             feishu_as or os.environ.get("CODEX_AUTO_CONTINUE_FEISHU_AS", DEFAULT_FEISHU_AS)
         ).strip().lower()
-        if self.feishu_as not in {"bot", "user"}:
+        # 用户规则（2026-10-30）：禁止用用户飞书身份（--as user）发消息。
+        # 原实现允许 "user"，会让本地 Codex 会话续跑摘要以**用户本人名义**发出 ——
+        # 收件方看到用户自言自语，审计也分不清是谁发的。非法值一律回落 bot。
+        if self.feishu_as != "bot":
             self.feishu_as = DEFAULT_FEISHU_AS
         self.notification_interval_seconds = max(
             1.0,
@@ -833,6 +877,9 @@ class SessionAutoContinue:
             separators=(",", ":"),
         )
         idempotency_key = "cac-" + hashlib.sha1(idempotency_seed.encode("utf-8")).hexdigest()[:24]
+        # fail-closed 校验（2026-10-30 用户规则）：目标为空 / 是已废弃群 /
+        # 身份不是 bot 时直接抛错，绝不「发了再说」。见 validateFeishuTarget。
+        target = validateFeishuTarget(self.feishu_chat_id, self.feishu_as)
         result = subprocess.run(
             [
                 lark_cli,
@@ -841,7 +888,7 @@ class SessionAutoContinue:
                 "--as",
                 self.feishu_as,
                 "--chat-id",
-                self.feishu_chat_id,
+                target,
                 "--text",
                 message,
                 "--idempotency-key",
