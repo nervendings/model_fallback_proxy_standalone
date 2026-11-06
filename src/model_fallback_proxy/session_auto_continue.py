@@ -103,6 +103,10 @@ FOREGROUND_RETRY_DELAYS_SECONDS = (2.0, 5.0, 10.0, 30.0, 60.0)
 DEFAULT_PENDING_MAX_AGE_SECONDS = 21600.0
 # 历史遗留项没有 queued_at，重试次数失控即按僵尸处理（正常项 6 小时内到不了 1000 次）。
 LEGACY_PENDING_RETRY_THRESHOLD = 1000
+# 前台通道连续不可注入上限：达到后停止自动续跑并提示人工接管。
+# 实测会话 01a17838 在 prompt_not_ready 下按 60s 间隔重试 320 次（>5 小时），
+# 每次都写状态文件与日志，既救不回会话也放大磁盘/CPU 抖动。
+FOREGROUND_MAX_RETRY_COUNT = 30
 SESSION_TAIL_SCAN_BYTES = 262144
 # 会话文件在此窗口内仍有写入即视为回合进行中（用于长回合的保守判定）。
 ACTIVE_MTIME_WINDOW_SECONDS = 120.0
@@ -1200,6 +1204,23 @@ class SessionAutoContinue:
             )
             return False, None
         retry_count = int(item.get("retry_count") or 0) + 1
+        if retry_count > FOREGROUND_MAX_RETRY_COUNT:
+            # 连续多轮仍不可注入：放弃自动续跑，避免无限僵尸重试。
+            session["last_action"] = "foreground_gave_up"
+            logging.warning(
+                "auto-continue foreground gave up session=%s turn=%s retries=%d reason=%s",
+                session_id,
+                turn_id,
+                retry_count,
+                reason or status or "unknown",
+            )
+            self.emitNotice(
+                session_id,
+                turn_id,
+                f"前台连续 {retry_count - 1} 次不可注入（{reason or status or 'unknown'}），已停止自动续跑，请人工接管。",
+                "warning",
+            )
+            return False, None
         delay_index = min(retry_count - 1, len(FOREGROUND_RETRY_DELAYS_SECONDS) - 1)
         item["retry_count"] = retry_count
         item["not_before"] = now + FOREGROUND_RETRY_DELAYS_SECONDS[delay_index]

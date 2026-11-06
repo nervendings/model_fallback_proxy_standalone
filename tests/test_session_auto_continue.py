@@ -558,6 +558,35 @@ class SessionAutoContinueTest(unittest.TestCase):
             self.assertEqual(watcher.state["pending_failures"], [])
             self.assertEqual(watcher.state["sessions"][SESSION_ID]["last_action"], "foreground_continued")
 
+    def test_foreground_gives_up_after_max_retries(self) -> None:
+        """前台连续不可注入达到上限后放弃，不再无限僵尸重试。"""
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            session_root = root / "sessions"
+            session_root.mkdir()
+            session_file = session_root / "session.jsonl"
+            session_file.touch()
+            clock = [100.0]
+            watcher = self.makeWatcher(
+                root,
+                [],
+                foreground_adapter=lambda request: {"status": "observe_only", "reason": "prompt_not_ready"},
+                time_fn=lambda: clock[0],
+            )
+            watcher.pending_max_age_seconds = 10 ** 9
+            self.appendMetadata(session_file)
+            self.appendFailure(session_file, "turn-stuck")
+            watcher.scan()
+            limit = auto_continue_module.FOREGROUND_MAX_RETRY_COUNT
+            # 已排队项从不早于 2s 起逐步推进，跨过上限后应被丢弃。
+            for _ in range(limit + 2):
+                if not watcher.state["pending_failures"]:
+                    break
+                clock[0] = float(watcher.state["pending_failures"][0]["not_before"]) + 0.5
+                watcher.scan()
+            self.assertEqual(watcher.state["pending_failures"], [])
+            self.assertEqual(watcher.state["sessions"][SESSION_ID]["last_action"], "foreground_gave_up")
+
     def test_prune_drops_legacy_zombie_pending_failures(self) -> None:
         """旧版遗留的高重试 pending 在启动时清理，避免僵尸重试。"""
         with tempfile.TemporaryDirectory() as temporary_dir:

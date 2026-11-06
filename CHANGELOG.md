@@ -4,6 +4,14 @@
 
 **继续工程师（JXG / Continue Engineer）**：容量不够自动换档，失败自动重试，前台自动续上。
 
+## 0.5.10 - 2026-11-06
+
+- 修复前台续跑「无限僵尸重试」：`prompt_not_ready` 等可重试原因此前只按 60s 间隔无限重试，
+  实测会话 `01a17838` 连续重试 327 次（>5 小时），每次都写状态文件与日志，既救不回会话又放大
+  磁盘/CPU 抖动。新增 `FOREGROUND_MAX_RETRY_COUNT = 30`，超限后置 `last_action=foreground_gave_up`、
+  丢弃 pending 并 emit warning 提示人工接管。
+- 测试 +1（`test_foreground_gives_up_after_max_retries`），全量 81 tests PASS。
+
 ## 0.5.9 - 2026-10-16
 
 - 新增「会话历史密文损坏」熔断：服务端 hydration 失败（`encrypted content ... could not be verified`）
