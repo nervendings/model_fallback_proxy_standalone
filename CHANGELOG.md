@@ -1,5 +1,16 @@
 # 变更记录
 
+## 0.5.11 - 2026-11-06
+
+- 新增「确定性故障闸门」：同一会话在同一小时内重复同一故障签名达到 6 次即停手并交人工。
+  实测会话 `01a14e39`（rollout 399MB）每次请求都 `400001 read body failed`，watcher 每 60s 注入
+  一次「继续」，累计 **162 次**仍不自愈，只烧 token 与磁盘。
+- 新增 `getFailureSignature`：把失败归一为稳定签名（400001_body / http_502 / stream_disconnected /
+  corrupted_history / capacity / context_window），不取 request id 与时间戳。
+- **只对确定性签名生效**（`400001_body`、`corrupted_history`、`context_window`）；
+  502/503/断流/容量这类瞬时故障保持原有「无上限重试」语义，不误伤。
+- 测试 +2：确定性 400001 达上限停手；瞬时 502 超限仍继续重试。全量 **83 passed**。
+
 ## 项目名称
 
 **继续工程师（JXG / Continue Engineer）**：容量不够自动换档，失败自动重试，前台自动续上。

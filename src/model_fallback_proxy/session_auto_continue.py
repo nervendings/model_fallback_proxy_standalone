@@ -107,6 +107,20 @@ LEGACY_PENDING_RETRY_THRESHOLD = 1000
 # 实测会话 01a17838 在 prompt_not_ready 下按 60s 间隔重试 320 次（>5 小时），
 # 每次都写状态文件与日志，既救不回会话也放大磁盘/CPU 抖动。
 FOREGROUND_MAX_RETRY_COUNT = 30
+# 确定性故障（重试不可能自愈）的同一签名重复次数上限。
+# 实测 01a14e39：399MB rollout 每次请求都 400001 read body failed，
+# auto-continue 每 60s 注入一次“继续”，累计 162 次仍不自愈——
+# 这类故障重试只会继续烧 token 与磁盘。
+# 只对确定性签名生效；502/503/断流/容量等瞬时故障仍保持无上限重试。
+REPEATED_FAILURE_LIMIT = 6
+REPEATED_FAILURE_WINDOW_SECONDS = 3600.0
+DETERMINISTIC_FAILURE_SIGNATURES = frozenset(
+    {
+        "400001_body",
+        "corrupted_history",
+        "context_window",
+    }
+)
 SESSION_TAIL_SCAN_BYTES = 262144
 # 会话文件在此窗口内仍有写入即视为回合进行中（用于长回合的保守判定）。
 ACTIVE_MTIME_WINDOW_SECONDS = 120.0
@@ -174,6 +188,32 @@ def isCapacityError(error: Any) -> bool:
 def getRetryableFailureKind(error: Any) -> str:
     """返回可换档瞬时故障类型；空串表示只按普通失败续跑。"""
     return getRetryableModelFailureKind(error)
+
+
+def getFailureSignature(error: Any) -> str:
+    """把一次失败归一到稳定签名，用于识别「同一个确定性故障反复发生」。
+
+    只取可以稳定复现的特征：400001、http 状态码、断流、密文损坏、容量类。
+    不取 request id / 时间戳，否则每次签名都不同，闸门永远不触发。
+    """
+    raw = error.get("message") if isinstance(error, dict) else error
+    text = str(raw or "").lower()
+    if not text:
+        return "unknown"
+    if "400001" in text or "read body failed" in text:
+        return "400001_body"
+    for status in ("502", "503", "429", "529", "500", "504"):
+        if f"status {status}" in text or f" {status} " in text:
+            return f"http_{status}"
+    if "stream disconnected" in text or "stream closed before" in text:
+        return "stream_disconnected"
+    if "could not be verified" in text or "hydration failed" in text:
+        return "corrupted_history"
+    if "at capacity" in text or "overloaded" in text:
+        return "capacity"
+    if "context window" in text or "context_window_exceeded" in text:
+        return "context_window"
+    return "other"
 
 
 def isFailureEvent(payload: dict[str, Any]) -> bool:
@@ -556,6 +596,30 @@ class SessionAutoContinue:
                 timestamps.append(timestamp)
         session["continue_times"] = timestamps[-CONTINUE_BURST_LIMIT:]
         return session["continue_times"]
+
+    def recordFailureSignature(self, session: dict[str, Any], signature: str, now: float) -> int:
+        """记录一次失败签名，返回同一签名在窗口内的累计次数。"""
+        raw = session.get("failure_signatures")
+        if not isinstance(raw, list):
+            raw = []
+        kept: list[list[Any]] = []
+        count = 0
+        for item in raw:
+            if not isinstance(item, (list, tuple)) or len(item) != 2:
+                continue
+            try:
+                ts = float(item[0])
+            except (TypeError, ValueError):
+                continue
+            if ts <= now - REPEATED_FAILURE_WINDOW_SECONDS:
+                continue
+            kept.append([ts, str(item[1])])
+            if str(item[1]) == signature:
+                count += 1
+        count += 1
+        kept.append([now, signature])
+        session["failure_signatures"] = kept[-64:]
+        return count
 
     def getContinuePauseUntil(self, session: dict[str, Any], now: float) -> float:
         timestamps = self.pruneContinueTimes(session, now)
@@ -1271,6 +1335,26 @@ class SessionAutoContinue:
             logging.warning("auto-continue queued concurrent failure session=%s turn=%s", session_id, turn_id)
             return
         now = self.time_fn()
+        # 确定性故障闸门：同一会话在同一窗口内重复同一签名失败，重试不会自愈。
+        signature = getFailureSignature(payload.get("error"))
+        repeats = self.recordFailureSignature(session, signature, now)
+        if signature in DETERMINISTIC_FAILURE_SIGNATURES and repeats >= REPEATED_FAILURE_LIMIT:
+            session["last_action"] = "repeated_failure_gave_up"
+            self.clearPendingFailures(session_id)
+            logging.warning(
+                "auto-continue gave up on repeated failure session=%s signature=%s repeats=%d",
+                session_id,
+                signature,
+                repeats,
+            )
+            self.emitNotice(
+                session_id,
+                turn_id,
+                f"同一故障（{signature}）在 {int(REPEATED_FAILURE_WINDOW_SECONDS / 60)} 分钟内已出现 {repeats} 次，"
+                f"判断为重试不可自愈，已停止自动续跑，请人工接管。",
+                "warning",
+            )
+            return
         pause_until = self.getContinuePauseUntil(session, now)
         if pause_until > now:
             self.queuePendingFailure(file_state, payload, not_before=pause_until)

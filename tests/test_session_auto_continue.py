@@ -587,6 +587,52 @@ class SessionAutoContinueTest(unittest.TestCase):
             self.assertEqual(watcher.state["pending_failures"], [])
             self.assertEqual(watcher.state["sessions"][SESSION_ID]["last_action"], "foreground_gave_up")
 
+    def test_deterministic_400001_stops_after_limit(self) -> None:
+        """400001 这类确定性故障重复出现时停手，不无限注入“继续”。"""
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            session_root = root / "sessions"
+            session_root.mkdir()
+            session_file = session_root / "session.jsonl"
+            session_file.touch()
+            clock = [1000.0]
+            watcher = self.makeWatcher(root, [], time_fn=lambda: clock[0], allow_background_fallback=False)
+            self.appendMetadata(session_file)
+            limit = auto_continue_module.REPEATED_FAILURE_LIMIT
+            for index in range(limit + 1):
+                clock[0] += 61.0
+                self.appendFailure(
+                    session_file,
+                    f"turn-400001-{index}",
+                    error={"message": '{"error":{"code":"400001","message":"read body failed"}}'},
+                )
+                watcher.scan()
+            state = watcher.state["sessions"][SESSION_ID]
+            self.assertEqual(state["last_action"], "repeated_failure_gave_up")
+            self.assertEqual(watcher.state["pending_failures"], [])
+
+    def test_transient_502_keeps_retrying_without_limit(self) -> None:
+        """瞬时 502 不属于确定性故障，不应触发停手闸门。"""
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            session_root = root / "sessions"
+            session_root.mkdir()
+            session_file = session_root / "session.jsonl"
+            session_file.touch()
+            clock = [1000.0]
+            watcher = self.makeWatcher(root, [], time_fn=lambda: clock[0], allow_background_fallback=False)
+            self.appendMetadata(session_file)
+            for index in range(auto_continue_module.REPEATED_FAILURE_LIMIT + 2):
+                clock[0] += 61.0
+                self.appendFailure(
+                    session_file,
+                    f"turn-502-{index}",
+                    error={"message": "unexpected status 502 Bad Gateway", "codex_error_info": "other"},
+                )
+                watcher.scan()
+            state = watcher.state["sessions"][SESSION_ID]
+            self.assertNotEqual(state["last_action"], "repeated_failure_gave_up")
+
     def test_prune_drops_legacy_zombie_pending_failures(self) -> None:
         """旧版遗留的高重试 pending 在启动时清理，避免僵尸重试。"""
         with tempfile.TemporaryDirectory() as temporary_dir:
