@@ -1,5 +1,14 @@
 # 变更记录
 
+## 0.5.12 - 2026-11-06
+
+- 彻底隔离测试与生产状态：另有 8 处 `SessionAutoContinue(...)` 构造只传 `state_path`，
+  其余路径落默认值，把 `session_id=00000000` 的测试事件持续写进生产 `events.jsonl`
+  （实测累计 7 条，污染真实告警流水）。全部补齐 `events_path`（必要时补 `log_root`/`session_root`）。
+- 新增守卫测试 `tests/test_no_production_pollution.py`：静态扫描所有测试里的
+  `SessionAutoContinue(` 构造，缺 `events_path` 直接失败，防止以后回退。
+- 验证：pytest 84 passed；跑全量测试前后生产 `events.jsonl` 大小 delta=0。
+
 ## 0.5.11 - 2026-11-06
 
 - 新增「确定性故障闸门」：同一会话在同一小时内重复同一故障签名达到 6 次即停手并交人工。

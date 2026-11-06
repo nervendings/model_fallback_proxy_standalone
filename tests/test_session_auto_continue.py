@@ -942,7 +942,12 @@ class SessionAutoContinueTest(unittest.TestCase):
     def test_default_notification_channel_is_local_without_feishu(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             with patch.dict(os.environ, {}, clear=True):
-                watcher = SessionAutoContinue(state_path=Path(temporary_dir) / "state.json")
+                watcher = SessionAutoContinue(
+                    session_root=Path(temporary_dir) / "sessions",
+                    state_path=Path(temporary_dir) / "state.json",
+                    log_root=Path(temporary_dir) / "logs",
+                    events_path=Path(temporary_dir) / "events.jsonl",
+                )
             self.assertEqual(watcher.notification_channel, "local")
             self.assertTrue(watcher.linux_notify)
             self.assertFalse(watcher.feishu_notify)
@@ -954,6 +959,7 @@ class SessionAutoContinueTest(unittest.TestCase):
                     run_mock.return_value.returncode = 0
                     watcher = SessionAutoContinue(
                         state_path=Path(temporary_dir) / "state.json",
+                        events_path=Path(temporary_dir) / "events.jsonl",
                         notification_channel="local",
                         notify_bin="notify-send",
                     )
@@ -983,6 +989,7 @@ class SessionAutoContinueTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_dir:
             watcher = SessionAutoContinue(
                 state_path=Path(temporary_dir) / "state.json",
+                events_path=Path(temporary_dir) / "events.jsonl",
                 notification_channel="local",
                 notify_bin="notify-send",
             )
@@ -997,6 +1004,7 @@ class SessionAutoContinueTest(unittest.TestCase):
             notifications: list[dict[str, Any]] = []
             watcher = SessionAutoContinue(
                 state_path=Path(temporary_dir) / "state.json",
+                events_path=Path(temporary_dir) / "events.jsonl",
                 notification_channel="local",
                 notification_sender=notifications.append,
                 time_fn=lambda: 1000.0,
@@ -1014,6 +1022,7 @@ class SessionAutoContinueTest(unittest.TestCase):
                     run_mock.return_value.returncode = 0
                     watcher = SessionAutoContinue(
                         state_path=root / "state.json",
+                        events_path=root / "events.jsonl",
                         feishu_notify=True,
                         feishu_chat_id="oc_test_chat",
                         feishu_as="bot",
@@ -1186,6 +1195,7 @@ class SessionAutoContinueTest(unittest.TestCase):
                 session_root=session_root,
                 state_path=state_path,
                 log_root=root / "logs",
+                events_path=root / "events.jsonl",
                 codex_bin=Path("/usr/bin/codex"),
                 process_factory=lambda command, **kwargs: commands.append(FakeProcess(command, **kwargs)) or commands[-1],
                 allow_background_fallback=True,
@@ -1210,7 +1220,13 @@ class SessionAutoContinueTest(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            watcher = SessionAutoContinue(state_path=state_path, allow_background_fallback=False)
+            watcher = SessionAutoContinue(
+                session_root=Path(temporary_dir) / "sessions",
+                state_path=state_path,
+                log_root=Path(temporary_dir) / "logs",
+                events_path=Path(temporary_dir) / "events.jsonl",
+                allow_background_fallback=False,
+            )
             session = watcher.state["sessions"][SESSION_ID]
             self.assertNotIn("active", session)
             self.assertEqual(session["last_action"], "migrated_foreground_only")
@@ -1256,5 +1272,10 @@ class TestFeishuTargetGuard(unittest.TestCase):
         """配置里写 user 也要被强制改回 bot。"""
 
         from model_fallback_proxy.session_auto_continue import SessionAutoContinue
-        cfg = SessionAutoContinue(feishu_notify=False, feishu_as="user")
+        cfg = SessionAutoContinue(
+            state_path=Path(tempfile.mkdtemp()) / "state.json",
+            events_path=Path(tempfile.mkdtemp()) / "events.jsonl",
+            feishu_notify=False,
+            feishu_as="user",
+        )
         self.assertEqual(cfg.feishu_as, "bot")
