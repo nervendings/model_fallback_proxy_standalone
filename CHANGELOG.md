@@ -1,12 +1,24 @@
 # 变更记录
 
+## 0.5.14 - 2026-11-06
+
+- **放开终端注入白名单**：`ALLOWED_INPUT_PAYLOADS` 从「只允许 `继续\r`」扩为 4 个固定安全指令
+  （`继续\r`、`/compact`、`/compact\r`、`\r`）。
+
+  背景：被 TUI 占住 writer 的会话，daemon `thread/resume` 一律报 `already has an active writer`，
+  唯一通道是往该 pty 发 `/compact`；而白名单把它挡死，导致这类会话只能等死。
+  实测本会话 `01a1afdb` 登记压缩后 1 小时未执行，手动跑 service 也全是 `active writer`。
+- 白名单仍**封闭**：任意文本（`rm -rf /`、管道命令等）一律拒绝，新增项需人工评审。
+- 测试 +4（continue 放行 / compact 放行 / 任意文本拒绝 / 白名单规模上限），全量 **92 passed**。
+
 ## 0.5.13 - 2026-11-06
 
 - **安全门修复**：`WaveTermForegroundAdapter.inject()` 旧实现完全绕过 `observe_only`，
   调用方以为在观察，实际已经把按键打进用户终端。现加显式早退，返回 `status=observe_only`。
   生产 `CODEX_AUTO_CONTINUE_FOREGROUND=1`（observe_only=False）不受影响。
 - `inject()` 支持自定义 `payload`：被外部 TUI 占住 writer 的会话，daemon 压不了，
-  唯一可行通道是往该 pty 发 `/compact`；此前 payload 硬编码 `继续`，这类会话永远救不回来。
+  唯一可行通道是往该 pty 发 `/compact`；此前 payload 硬编码 `继续
+`，这类会话永远救不回来。
 - 测试 +4（默认 payload、自定义 payload、observe_only 不发送、dry 通道），全量 **88 passed**。
 
 ## 0.5.12 - 2026-11-06

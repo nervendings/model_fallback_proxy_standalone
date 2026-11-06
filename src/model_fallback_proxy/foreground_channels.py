@@ -160,7 +160,7 @@ class ControlledPtyTransport:
             payload = base64.b64decode(input_data64, validate=True).decode("utf-8")
         except (ValueError, UnicodeDecodeError):
             return False
-        if payload != PAYLOAD or not self._verify_identity(candidate):
+        if payload not in ALLOWED_INPUT_PAYLOADS or not self._verify_identity(candidate):
             return False
         with self._target_lock(candidate) as locked:
             if not locked:
@@ -289,7 +289,7 @@ class VirtualEmployeeHookTransport:
             payload = base64.b64decode(input_data64, validate=True).decode("utf-8")
         except (ValueError, UnicodeDecodeError):
             return False
-        if payload != PAYLOAD:
+        if payload not in ALLOWED_INPUT_PAYLOADS:
             return False
         body = {
             "protocol": 1,
@@ -298,7 +298,7 @@ class VirtualEmployeeHookTransport:
             "session_id": candidate.session_id,
             "hook_id": candidate.hook_id,
             "cwd": candidate.cwd,
-            "payload": PAYLOAD,
+            "payload": payload,
             "input_data64": input_data64,
         }
         try:
@@ -338,6 +338,20 @@ class FrontendTransportRouter:
         if candidate.channel == CHANNEL_VIRTUAL_EMPLOYEE:
             return self.virtual.controller_input(block_id, input_data64, auth_token, candidate, event_id)
         return False
+
+
+# 允许注入终端的指令白名单。
+# 2026-11-06：原来只放行 PAYLOAD（"继续\r"），导致被 TUI 占住 writer 的会话
+# 只能等死 —— daemon 压不了，唯一通道却被白名单挡死。
+# 只放开固定的安全指令，绝不允许任意文本（防注入）。
+ALLOWED_INPUT_PAYLOADS = frozenset(
+    {
+        PAYLOAD,          # "继续\r"
+        "/compact",
+        "/compact\r",
+        "\r",
+    }
+)
 
 
 class MultiFrontendAdapter:
