@@ -1,5 +1,14 @@
 # 变更记录
 
+## 0.5.13 - 2026-11-06
+
+- **安全门修复**：`WaveTermForegroundAdapter.inject()` 旧实现完全绕过 `observe_only`，
+  调用方以为在观察，实际已经把按键打进用户终端。现加显式早退，返回 `status=observe_only`。
+  生产 `CODEX_AUTO_CONTINUE_FOREGROUND=1`（observe_only=False）不受影响。
+- `inject()` 支持自定义 `payload`：被外部 TUI 占住 writer 的会话，daemon 压不了，
+  唯一可行通道是往该 pty 发 `/compact`；此前 payload 硬编码 `继续`，这类会话永远救不回来。
+- 测试 +4（默认 payload、自定义 payload、observe_only 不发送、dry 通道），全量 **88 passed**。
+
 ## 0.5.12 - 2026-11-06
 
 - 彻底隔离测试与生产状态：另有 8 处 `SessionAutoContinue(...)` 构造只传 `state_path`，

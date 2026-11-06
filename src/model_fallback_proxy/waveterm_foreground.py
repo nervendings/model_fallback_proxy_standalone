@@ -470,14 +470,26 @@ class WaveTermForegroundAdapter:
         suffix = [line.strip() for line in window[marker_index + 1:] if line.strip()]
         return True, "\n".join(suffix)
 
-    def inject(self, event_id: str, target: WaveTermCandidate, *, now: float | None = None) -> dict[str, Any]:
+    def inject(self, event_id: str, target: WaveTermCandidate, *, now: float | None = None,
+               payload: str | None = None) -> dict[str, Any]:
+        """向目标终端注入文本（默认常量 PAYLOAD）。
+
+        payload 可覆盖：被 TUI 占住 writer 的会话，daemon 压不了，唯一可行通道
+        是往那个 pty 发 `/compact`。此前 payload 硬编码，导致这类会话永远救不回来。
+        """
         now = self.clock() if now is None else now
         prior = self.records.get(event_id)
         if prior and prior.status in {"injected", "confirmed"}:
             return self._audit(event_id, prior.status, reason="idempotent")
         if prior and now < prior.next_retry_at:
             return self._audit(event_id, "backoff", reason="retry_deferred")
-        encoded = base64.b64encode(PAYLOAD.encode("utf-8")).decode("ascii")
+        # 安全门：observe_only 必须真正只观察。
+        # 2026-11-06 审计发现旧实现里 inject() 完全绕过 observe_only，
+        # 调用方以为在观察，实际已经把按键打进用户终端。
+        if self.observe_only:
+            return self._audit(event_id, "observe_only", reason="observe_only")
+        text = PAYLOAD if payload is None else str(payload)
+        encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
         sender = getattr(self.transport, "controller_input", None)
         if sender is None:
             sender = getattr(self.transport, "send_controller_input", None)
