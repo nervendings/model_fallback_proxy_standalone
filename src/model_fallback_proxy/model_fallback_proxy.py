@@ -8,21 +8,32 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 import aiohttp
 from aiohttp import web
 
+try:
+    from .error_classification import (
+        CAPACITY_MARKERS,
+        isCapacityText as isCapacityErrorText,
+        isRemoteCompactTransientError,
+    )
+except ImportError:  # pragma: no cover - 兼容直接执行源码文件。
+    from error_classification import (
+        CAPACITY_MARKERS,
+        isCapacityText as isCapacityErrorText,
+        isRemoteCompactTransientError,
+    )
+
 
 DEFAULT_UPSTREAM_URL = ""
 DEFAULT_LISTEN_HOST = "127.0.0.1"
 DEFAULT_LISTEN_PORT = 4477
-DEFAULT_MODEL_CHAIN = (
-    "gpt-5.6-sol",
-    "gpt-5.6-terra",
-    "gpt-5.6-luna",
-)
+MODEL_POLICY_PATH = Path.home() / ".codex" / "model_policy.json"
+DEFAULT_MODEL_CHAIN = ("deepseek-v4-flash",)
 DEFAULT_COOLDOWN_SECONDS = 180
 MAX_INSPECTION_BYTES = 1024 * 1024
 HOP_BY_HOP_HEADERS = {
@@ -37,16 +48,7 @@ HOP_BY_HOP_HEADERS = {
     "transfer-encoding",
     "upgrade",
 }
-CAPACITY_MARKERS = (
-    "selected model is at capacity",
-    "model is at capacity",
-    "server_overloaded",
-    "server overloaded",
-    "no available accounts",
-    "capacity exceeded",
-    "capacity_exceeded",
-)
-TRANSIENT_MODEL_UNAVAILABLE_STATUSES = {429, 503, 529}
+TRANSIENT_MODEL_UNAVAILABLE_STATUSES = {429, 502, 503, 529}
 IGNORED_SSE_TYPES = {
     "ping",
     "response.created",
@@ -59,15 +61,34 @@ IGNORED_SSE_TYPES = {
     "response.output_text.done",
     "response.completed",
 }
-MODEL_REASONING_EFFORT_REWRITES = {
-    "gpt-5.6-luna": {"ultra": "max"},
-}
+MODEL_REASONING_EFFORT_REWRITES: dict[str, dict[str, str]] = {}
+
+
+def _loadModelPolicy() -> dict[str, Any]:
+    """读取统一模型策略；缺失或损坏时返回空字典，由调用方兜底。"""
+    try:
+        import json
+
+        return json.loads(MODEL_POLICY_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
 
 
 def readModelChain() -> tuple[str, ...]:
     raw_value = os.getenv("CODEX_FALLBACK_MODEL_CHAIN", "")
     values = tuple(item.strip() for item in raw_value.split(",") if item.strip())
-    return values or DEFAULT_MODEL_CHAIN
+    if values:
+        return values
+    policy = _loadModelPolicy()
+    chain = policy.get("fallback") or [policy.get("primary") or "deepseek-v4-flash"]
+    return tuple(str(model) for model in chain) or DEFAULT_MODEL_CHAIN
+
+
+def isGpt56Model(model_name: str) -> bool:
+    """只有策略链内模型允许进入自动降级链（链由 model_policy.json 动态配置）。"""
+    return str(model_name or "").strip().lower() in {
+        model.lower() for model in readModelChain()
+    }
 
 
 def readUpstreamUrl(explicit_url: str | None = None) -> str:
@@ -81,11 +102,8 @@ def readUpstreamUrl(explicit_url: str | None = None) -> str:
 
 
 def isCapacityText(raw_value: str | bytes) -> bool:
-    if isinstance(raw_value, bytes):
-        text_value = raw_value.decode("utf-8", "ignore").lower()
-    else:
-        text_value = str(raw_value).lower()
-    return any(marker in text_value for marker in CAPACITY_MARKERS)
+    """兼容既有导入入口；真实判定由共享归一化逻辑完成。"""
+    return isCapacityErrorText(raw_value)
 
 
 def getCapacityHeaderText(headers: Any) -> str:
@@ -99,25 +117,35 @@ def getCapacityHeaderText(headers: Any) -> str:
 
 def isCapacityHttpResponse(status_code: int, raw_body: bytes, headers: Any | None = None) -> bool:
     has_capacity_marker = isCapacityText(raw_body)
+    has_remote_compact_marker = isRemoteCompactTransientError(raw_body)
     if headers is not None:
         has_capacity_marker = has_capacity_marker or isCapacityText(getCapacityHeaderText(headers))
-    if has_capacity_marker:
+        has_remote_compact_marker = has_remote_compact_marker or isRemoteCompactTransientError(
+            getCapacityHeaderText(headers)
+        )
+    if has_capacity_marker or has_remote_compact_marker:
         if status_code >= 400:
             return True
         payload = parseJsonBody(raw_body)
         if not isinstance(payload, dict):
-            return False
+            # 少数兼容层以 200 + text/plain 返回容量提示，正文不是 JSON。
+            # 该提示只在尚未向下游输出时出现，可以安全重试下一模型。
+            return True
         if isinstance(payload.get("error"), (dict, str)):
             return True
         message = payload.get("message")
-        if isinstance(message, str) and isCapacityText(message):
+        if isinstance(message, str) and (
+            isCapacityText(message) or isRemoteCompactTransientError(message)
+        ):
             return True
         codex_error_info = payload.get("codex_error_info")
-        if isinstance(codex_error_info, str) and isCapacityText(codex_error_info):
+        if isinstance(codex_error_info, str) and (
+            isCapacityText(codex_error_info) or isRemoteCompactTransientError(codex_error_info)
+        ):
             return True
         return False
 
-    # 上游偶尔仅以 503/529 表示当前模型不可用，且不在正文暴露错误码。
+    # 上游偶尔仅以 429/502/503/529 表示当前模型不可用，且不在正文暴露错误码。
     # 此时尚未向下游输出任何内容，可以安全尝试下一模型。
     return status_code in TRANSIENT_MODEL_UNAVAILABLE_STATUSES
 
@@ -142,11 +170,17 @@ def buildAttemptPayload(payload: dict[str, Any], model_name: str) -> dict[str, A
     reasoning = payload.get("reasoning")
     if isinstance(reasoning, dict):
         attempt_reasoning = dict(reasoning)
-        effort = str(attempt_reasoning.get("effort") or "")
+        effort = str(attempt_reasoning.get("effort") or "").strip().lower()
         effort_rewrites = MODEL_REASONING_EFFORT_REWRITES.get(model_name, {})
         if effort in effort_rewrites:
             attempt_reasoning["effort"] = effort_rewrites[effort]
         attempt_payload["reasoning"] = attempt_reasoning
+    # 兼容部分 OpenAI-compatible 客户端把思考档位放在顶层。
+    if isinstance(payload.get("reasoning_effort"), str):
+        effort = payload["reasoning_effort"].strip().lower()
+        effort_rewrites = MODEL_REASONING_EFFORT_REWRITES.get(model_name, {})
+        if effort in effort_rewrites:
+            attempt_payload["reasoning_effort"] = effort_rewrites[effort]
     return attempt_payload
 
 
@@ -208,15 +242,13 @@ def isMeaningfulSseEvent(raw_event: bytes) -> bool:
 def isCapacitySseEvent(raw_event: bytes) -> bool:
     event_type = getSseType(raw_event)
     if event_type in {"error", "response.failed"}:
-        return isCapacityText(raw_event)
+        return isCapacityText(raw_event) or isRemoteCompactTransientError(raw_event)
     if event_type:
         return False
-    # 部分中转会把失败 JSON 放进 text/event-stream，但不带 event/type 字段。
-    # 只有同时出现容量标记和错误字段时才判定，避免把正常输出文本误判为失败。
+    # 部分中转会把失败文本或 JSON 放进 text/event-stream，但不带 event/type 字段。
+    # 结构化的正常输出有明确事件类型，不会走到这里；无类型容量提示应直接重试。
     text_value = raw_event.decode("utf-8", "ignore").lower()
-    return isCapacityText(text_value) and any(
-        marker in text_value for marker in ("error", "codex_error_info", "server_overloaded")
-    )
+    return isCapacityText(text_value) or isRemoteCompactTransientError(text_value)
 
 
 def isSseResponse(headers: Any) -> bool:
@@ -234,6 +266,7 @@ class ProxyState:
     capacity_count: int = 0
 
     def buildCandidates(self, requested_model: str) -> list[str]:
+        # 链内模型才参与自动降级；链由创建代理时的配置决定（env / model_policy）。
         if requested_model not in self.model_chain:
             return [requested_model]
         start_index = self.model_chain.index(requested_model)

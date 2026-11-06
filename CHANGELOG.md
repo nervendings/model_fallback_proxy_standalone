@@ -1,8 +1,97 @@
 # 变更记录
 
+## 0.5.13 - 2026-11-06
+
+- **安全门修复**：`WaveTermForegroundAdapter.inject()` 旧实现完全绕过 `observe_only`，
+  调用方以为在观察，实际已经把按键打进用户终端。现加显式早退，返回 `status=observe_only`。
+  生产 `CODEX_AUTO_CONTINUE_FOREGROUND=1`（observe_only=False）不受影响。
+- `inject()` 支持自定义 `payload`：被外部 TUI 占住 writer 的会话，daemon 压不了，
+  唯一可行通道是往该 pty 发 `/compact`；此前 payload 硬编码 `继续`，这类会话永远救不回来。
+- 测试 +4（默认 payload、自定义 payload、observe_only 不发送、dry 通道），全量 **88 passed**。
+
+## 0.5.12 - 2026-11-06
+
+- 彻底隔离测试与生产状态：另有 8 处 `SessionAutoContinue(...)` 构造只传 `state_path`，
+  其余路径落默认值，把 `session_id=00000000` 的测试事件持续写进生产 `events.jsonl`
+  （实测累计 7 条，污染真实告警流水）。全部补齐 `events_path`（必要时补 `log_root`/`session_root`）。
+- 新增守卫测试 `tests/test_no_production_pollution.py`：静态扫描所有测试里的
+  `SessionAutoContinue(` 构造，缺 `events_path` 直接失败，防止以后回退。
+- 验证：pytest 84 passed；跑全量测试前后生产 `events.jsonl` 大小 delta=0。
+
+## 0.5.11 - 2026-11-06
+
+- 新增「确定性故障闸门」：同一会话在同一小时内重复同一故障签名达到 6 次即停手并交人工。
+  实测会话 `01a14e39`（rollout 399MB）每次请求都 `400001 read body failed`，watcher 每 60s 注入
+  一次「继续」，累计 **162 次**仍不自愈，只烧 token 与磁盘。
+- 新增 `getFailureSignature`：把失败归一为稳定签名（400001_body / http_502 / stream_disconnected /
+  corrupted_history / capacity / context_window），不取 request id 与时间戳。
+- **只对确定性签名生效**（`400001_body`、`corrupted_history`、`context_window`）；
+  502/503/断流/容量这类瞬时故障保持原有「无上限重试」语义，不误伤。
+- 测试 +2：确定性 400001 达上限停手；瞬时 502 超限仍继续重试。全量 **83 passed**。
+
 ## 项目名称
 
 **继续工程师（JXG / Continue Engineer）**：容量不够自动换档，失败自动重试，前台自动续上。
+
+## 0.5.10 - 2026-11-06
+
+- 修复前台续跑「无限僵尸重试」：`prompt_not_ready` 等可重试原因此前只按 60s 间隔无限重试，
+  实测会话 `01a17838` 连续重试 327 次（>5 小时），每次都写状态文件与日志，既救不回会话又放大
+  磁盘/CPU 抖动。新增 `FOREGROUND_MAX_RETRY_COUNT = 30`，超限后置 `last_action=foreground_gave_up`、
+  丢弃 pending 并 emit warning 提示人工接管。
+- 测试 +1（`test_foreground_gives_up_after_max_retries`），全量 81 tests PASS。
+
+## 0.5.9 - 2026-10-16
+
+- 新增「会话历史密文损坏」熔断：服务端 hydration 失败（`encrypted content ... could not be verified`）
+  属不可恢复故障，`handleFailure` 不再无差别重试（实测旧行为对 PM 会话重试 61 次），
+  直接停止自动续跑、置 `last_action=corrupted_history` 并提示人工接管（开新会话 / 先 /compact）。
+- `error_classification.py` 新增 `isCorruptedHistoryError`：只匹配 hydration 明确特征，
+  不误伤通用 400002（input.type/tool.type）与容量类错误。
+- 测试 +2：分类器单元测试（真/假阳性边界）+ 守护集成测试（不产生续跑命令、不排队、发 error 提示）；
+  全量 75 tests PASS，仓库质量门禁 PASS。
+
+## 0.5.8 - 2026-10-09
+
+- 修复前台“继续”自 2026-09-30 起完全无法注入的问题（实测注入成功率归零、71 个任务积压）：
+  - `wsh` 解析兼容 systemd 服务环境：优先目标终端 `WAVETERM_WSHBINDIR`、`~/.local/share/waveterm/bin/wsh`，不再依赖服务 PATH。
+  - 就绪判定兼容新版 TUI 的 `› Ask Codex to do anything` 占位提示符；通过“运行态指示行”区分工作/空闲。
+  - 会话→终端块定位新增 `/proc` 文件句柄兜底（shell snapshot 缺失时仍可定位）。
+  - 回显截取窗口从 1600 提升到 4000 字符，避免忙碌标志行被长行截断后漏判。
+- 新增“不影响正常对话”安全门：注入前检查会话尾部状态，仅 `awaiting`（失败待恢复）允许注入；
+  `active`（回合进行中）/`completed`/`manual`/`unknown` 一律跳过；长回合中 `task_started`
+  滑出扫描窗口时按文件写入时间兜底判为 `active`；忙碌终端、输入框草稿、审批界面不注入。
+- 新增僵尸清理：等待注入超过 `CODEX_AUTO_CONTINUE_PENDING_MAX_AGE`（默认 6 小时）自动放弃；
+  启动时清理重试 ≥1000 次的历史遗留项（本次清掉 71 条）。
+- 修复 `buildCandidates` 忽略显式传入模型链的问题；同步对齐 09-19 换链后的测试断言（73 tests PASS）。
+
+## 0.5.7 - 2026-08-16
+
+- 统一错误归一化，终端换行或嵌套错误字段不会漏判。
+- 远程 compact 遇到通用 502 Bad Gateway、429/503/529、Bad Gateway 或 Upstream service temporarily unavailable 时，自动进入换档与“继续”流程。
+- 仅远程 compact 的可恢复上游故障进入换档；普通失败仍按既有逻辑直接续跑。
+
+## 0.5.6 - 2026-08-13
+
+- 识别远程 compact 的 `502 Bad Gateway: Upstream service temporarily unavailable` 错误。
+- 该错误自动进入 `gpt-5.6` 换档和前台“继续”流程；其它模型保持原模型继续。
+
+## 0.5.5 - 2026-08-12
+
+- 识别 `stream disconnected before completion: An error occurred while processing your request` 服务端瞬时错误。
+- 该错误与其它可恢复容量错误统一进入自动换档和前台“继续”流程。
+
+## 0.5.4 - 2026-08-12
+
+- 识别“stream disconnected before completion: Our servers are currently overloaded”及远程 compact 同类错误。
+- 代理请求自动重试下一档 `gpt-5.6` 模型；watcher 按现有前台策略自动发送“继续”。
+- 非 `gpt-5.6` 模型仍不切换，仅继续当前会话。
+
+## 0.5.3 - 2026-08-10
+
+- 修复容量降级强制启动后台 `codex exec resume` 导致的 `thread-store conflict`。
+- Codex TUI 容量失败统一通过当前前台输入“继续”；提示未就绪时持久化排队并延迟重试。
+- 后台 resume 兜底默认关闭，避免隐藏进程抢占用户交互；仅非交互会话显式开启时使用。
 
 ## 0.5.2 - 2026-08-07
 

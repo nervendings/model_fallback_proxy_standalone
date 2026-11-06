@@ -11,6 +11,7 @@ from aiohttp import ClientSession, web
 
 from model_fallback_proxy.model_fallback_proxy import (
     DEFAULT_MODEL_CHAIN,
+    ProxyState,
     buildAttemptPayload,
     createApp,
     isCapacityHttpResponse,
@@ -18,6 +19,7 @@ from model_fallback_proxy.model_fallback_proxy import (
     isCapacityText,
     isMeaningfulSseEvent,
 )
+from model_fallback_proxy.error_classification import isCorruptedHistoryError, isRemoteCompactTransientError
 
 
 MODEL_CHAIN = ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
@@ -54,6 +56,38 @@ class ModelFallbackProxyTest(unittest.IsolatedAsyncioTestCase):
     def test_capacity_markers(self) -> None:
         self.assertTrue(isCapacityText("Selected model is at capacity. Please try a different model."))
         self.assertTrue(isCapacityText('{"codex_error_info":"server_overloaded"}'))
+        self.assertTrue(
+            isCapacityText(
+                "stream disconnected before completion: Our servers are currently overloaded. "
+                "Please try again later."
+            )
+        )
+        self.assertTrue(
+            isCapacityText(
+                "Error running remote compact task: stream disconnected before completion: "
+                "Our servers are currently overloaded. Please try again later."
+            )
+        )
+        self.assertTrue(
+            isCapacityText(
+                "stream disconnected before completion: An error occurred while processing your request. "
+                "You can retry your request."
+            )
+        )
+        self.assertTrue(
+            isCapacityText(
+                "Error running remote compact task: unexpected status 502 Bad Gateway: "
+                "Upstream service temporarily unavailable, url: http://127.0.0.1:4477/responses, "
+                "request id: xxxxx"
+            )
+        )
+        self.assertTrue(isCapacityText("Upstream service\ntemporarily unavailable"))
+        self.assertTrue(
+            isRemoteCompactTransientError(
+                "Error running remote compact task:\n"
+                "unexpected status 502 Bad Gateway, url: http://127.0.0.1:4477/responses"
+            )
+        )
         self.assertFalse(isCapacityText("invalid API key"))
 
     def test_http_capacity_fallback_accepts_error_headers_and_empty_503(self) -> None:
@@ -61,12 +95,20 @@ class ModelFallbackProxyTest(unittest.IsolatedAsyncioTestCase):
             isCapacityHttpResponse(502, b'{"error":"unavailable"}', {"X-Codex-Error-Info": "server_overloaded"})
         )
         self.assertTrue(isCapacityHttpResponse(503, b""))
+        self.assertTrue(isCapacityHttpResponse(502, b""))
         self.assertTrue(isCapacityHttpResponse(529, b"temporary upstream failure"))
         self.assertTrue(isCapacityHttpResponse(429, b""))
         self.assertFalse(isCapacityHttpResponse(500, b"temporary upstream failure"))
 
-    def test_default_model_chain_stops_at_luna(self) -> None:
-        self.assertEqual(DEFAULT_MODEL_CHAIN, MODEL_CHAIN)
+    def test_default_model_chain_uses_policy_single_model_placeholder(self) -> None:
+        """未配置策略时默认链只含单一占位模型，防止重新硬编码旧 gpt-5.6 链路。"""
+        self.assertEqual(DEFAULT_MODEL_CHAIN, ("deepseek-v4-flash",))
+
+    def test_build_candidates_uses_only_configured_chain(self) -> None:
+        state = ProxyState(("gpt-5.5", "gpt-5.6-luna"), cooldown_seconds=30)
+        # 链内模型参与降级；链外模型保持原样。
+        self.assertEqual(state.buildCandidates("gpt-5.5"), ["gpt-5.5", "gpt-5.6-luna"])
+        self.assertEqual(state.buildCandidates("unknown-model"), ["unknown-model"])
 
     def test_upstream_url_requires_explicit_safe_environment_value(self) -> None:
         from model_fallback_proxy.model_fallback_proxy import readUpstreamUrl
@@ -81,6 +123,84 @@ class ModelFallbackProxyTest(unittest.IsolatedAsyncioTestCase):
         body = b'{"message":"Selected model is at capacity. Please try a different model."}'
         self.assertTrue(isCapacityHttpResponse(200, body))
 
+    def test_plain_text_capacity_response_is_retryable(self) -> None:
+        body = b"Selected model is at capacity. Please try a different model."
+        self.assertTrue(isCapacityHttpResponse(200, body, {"Content-Type": "text/plain"}))
+
+    def test_overloaded_stream_disconnect_response_is_retryable(self) -> None:
+        body = (
+            b"Error running remote compact task: stream disconnected before completion: "
+            b"Our servers are currently overloaded. Please try again later."
+        )
+        self.assertTrue(isCapacityHttpResponse(200, body, {"Content-Type": "text/plain"}))
+
+    def test_processing_error_response_is_retryable(self) -> None:
+        body = (
+            b"stream disconnected before completion: An error occurred while processing your request. "
+            b"You can retry your request, or contact us through our help center."
+        )
+        self.assertTrue(isCapacityHttpResponse(200, body, {"Content-Type": "text/plain"}))
+
+    def test_remote_compact_bad_gateway_response_is_retryable(self) -> None:
+        body = (
+            b"Error running remote compact task: unexpected status 502 Bad Gateway: "
+            b"Upstream service temporarily unavailable, url: http://127.0.0.1:4477/responses, "
+            b"request id: xxxxx"
+        )
+        self.assertTrue(isCapacityHttpResponse(200, body, {"Content-Type": "text/plain"}))
+
+    def test_corrupted_history_encrypted_content_is_detected(self) -> None:
+        """密文水合失败必须识别，避免自动续跑无意义重试。"""
+        message = (
+            "stream disconnected before completion: The encrypted content for item "
+            "amsg_01a14167-6378-77b0-8d62-6acadf4009cb could not be verified. Reason: "
+            "encrypted content hydration failed: Encrypted content could not be decrypted or parsed."
+        )
+        self.assertTrue(isCorruptedHistoryError({"message": message, "codex_error_info": "other"}))
+        self.assertTrue(isCorruptedHistoryError("encrypted content hydration failed"))
+        # 通用 400002/容量类错误不能误判为历史损坏。
+        self.assertFalse(
+            isCorruptedHistoryError(
+                '{"error":{"code":"400002","message":"The request parameter input is invalid or missing.",'
+                '"param":"input","type":"invalid_request_error"}}'
+            )
+        )
+        self.assertFalse(isCorruptedHistoryError("selected model is at capacity"))
+        self.assertFalse(isCorruptedHistoryError(None))
+
+    async def test_plain_text_capacity_falls_through_model_chain(self) -> None:
+        attempted_models: list[str] = []
+
+        async def upstreamHandler(request: web.Request) -> web.Response:
+            payload = await request.json()
+            model_name = str(payload["model"])
+            attempted_models.append(model_name)
+            if model_name == "gpt-5.6-sol":
+                return web.Response(
+                    text="Selected model is at capacity. Please try a different model.",
+                    content_type="text/plain",
+                )
+            return web.json_response({"model": model_name, "output": "OK"})
+
+        upstream_app = web.Application()
+        upstream_app.router.add_post("/responses", upstreamHandler)
+        async with RunningApp(upstream_app) as upstream:
+            proxy_app = createApp(upstream.url, MODEL_CHAIN, cooldown_seconds=30)
+            async with RunningApp(proxy_app) as proxy:
+                async with ClientSession() as session:
+                    response = await session.post(
+                        proxy.url + "/responses",
+                        json={"model": "gpt-5.6-sol", "reasoning": {"effort": "ultra"}},
+                    )
+                    body = await response.json()
+                    status = await (await session.get(proxy.url + "/_fallback/status")).json()
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(attempted_models, ["gpt-5.6-sol", "gpt-5.6-terra"])
+        self.assertEqual(body["model"], "gpt-5.6-terra")
+        self.assertEqual(status["fallback_count"], 1)
+        self.assertEqual(status["capacity_count"], 1)
+
     def test_sse_event_classification(self) -> None:
         created = b'event: response.created\ndata: {"type":"response.created"}\n\n'
         output = b'event: response.output_text.delta\ndata: {"type":"response.output_text.delta"}\n\n'
@@ -90,6 +210,24 @@ class ModelFallbackProxyTest(unittest.IsolatedAsyncioTestCase):
 
         raw_error = b'data: {"error":{"code":"server_overloaded"}}\n\n'
         self.assertTrue(isCapacitySseEvent(raw_error))
+        raw_text_error = b"data: Selected model is at capacity. Please try a different model.\n\n"
+        self.assertTrue(isCapacitySseEvent(raw_text_error))
+        raw_overloaded_error = (
+            b"data: stream disconnected before completion: Our servers are currently overloaded. "
+            b"Please try again later.\n\n"
+        )
+        self.assertTrue(isCapacitySseEvent(raw_overloaded_error))
+        raw_processing_error = (
+            b"data: stream disconnected before completion: An error occurred while processing your request. "
+            b"You can retry your request.\n\n"
+        )
+        self.assertTrue(isCapacitySseEvent(raw_processing_error))
+        raw_bad_gateway_error = (
+            b"data: Error running remote compact task: unexpected status 502 Bad Gateway: "
+            b"Upstream service temporarily unavailable, url: http://127.0.0.1:4477/responses, "
+            b"request id: xxxxx\n\n"
+        )
+        self.assertTrue(isCapacitySseEvent(raw_bad_gateway_error))
 
     def test_capacity_text_in_normal_output_is_not_an_error(self) -> None:
         normal_http = b'{"output_text":"Selected model is at capacity"}'
@@ -100,12 +238,20 @@ class ModelFallbackProxyTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(isCapacityHttpResponse(200, normal_http))
         self.assertFalse(isCapacitySseEvent(normal_sse))
 
-    def test_luna_rewrites_unsupported_ultra_effort(self) -> None:
-        payload = {"model": "gpt-5.6-sol", "reasoning": {"effort": "ultra", "summary": "auto"}}
-        terra_payload = buildAttemptPayload(payload, "gpt-5.6-terra")
-        luna_payload = buildAttemptPayload(payload, "gpt-5.6-luna")
-        self.assertEqual(terra_payload["reasoning"]["effort"], "ultra")
-        self.assertEqual(luna_payload["reasoning"]["effort"], "max")
+    def test_reasoning_effort_rewrites_are_applied_per_model_table(self) -> None:
+        """档位改写表当前为空（deepseek 链无需改写）；验证机制仍可用且不改原 payload。"""
+        from model_fallback_proxy import model_fallback_proxy as proxy_module
+
+        payload = {"model": "m1", "reasoning_effort": "ultra", "reasoning": {"effort": "ultra", "summary": "auto"}}
+        with patch.dict(proxy_module.MODEL_REASONING_EFFORT_REWRITES, {"m2": {"ultra": "max"}}, clear=True):
+            rewritten = buildAttemptPayload(payload, "m2")
+            self.assertEqual(rewritten["reasoning_effort"], "max")
+            self.assertEqual(rewritten["reasoning"]["effort"], "max")
+            untouched = buildAttemptPayload(payload, "m1")
+            self.assertEqual(untouched["reasoning_effort"], "ultra")
+            self.assertEqual(untouched["reasoning"]["effort"], "ultra")
+        # 原 payload 绝不被修改。
+        self.assertEqual(payload["reasoning_effort"], "ultra")
         self.assertEqual(payload["reasoning"]["effort"], "ultra")
 
     async def test_http_and_sse_capacity_fall_through_chain(self) -> None:

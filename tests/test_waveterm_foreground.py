@@ -143,6 +143,51 @@ class WaveTermForegroundTest(unittest.TestCase):
         self.assertEqual(result["reason"], "unsafe_prompt")
         self.assertFalse(transport.calls)
 
+    def test_ready_prompt_detects_new_tui_idle_state(self):
+        """新版 TUI 空闲态：占位符提示符 + DeepSeek 状态行也视为可输入。"""
+        idle = (
+            "› Ask Codex to do anything\n"
+            "\n"
+            "  DeepSeek-Flash max · Context 63% left · master · ~/x\n"
+            "  ? for shortcuts              ⚠ 3 warnings · f2 to view"
+        )
+        ready, _ = WaveTermForegroundAdapter._ready_prompt(idle)
+        self.assertTrue(ready)
+
+    def test_ready_prompt_rejects_busy_tui(self):
+        """工作回合未结束时（esc to interrupt）不得注入，避免打扰正常对话。"""
+        busy = (
+            "• Working (42m 10s • esc to interrupt)\n"
+            "  └ Tip: Press f3 to search this conversation.\n"
+            "\n"
+            "› Ask Codex to do anything\n"
+            "\n"
+            "  DeepSeek-Flash max · Context 64% left"
+        )
+        ready, _ = WaveTermForegroundAdapter._ready_prompt(busy)
+        self.assertFalse(ready)
+
+    def test_ready_prompt_rejects_user_draft(self):
+        """输入框已有用户草稿时不得注入，避免覆盖或误发。"""
+        draft = "› 我打了一半的字\n\n  DeepSeek-Flash max · Context 63% left"
+        ready, _ = WaveTermForegroundAdapter._ready_prompt(draft)
+        self.assertFalse(ready)
+
+    def test_resolve_wsh_prefers_terminal_bindir(self):
+        from model_fallback_proxy.waveterm_foreground import resolveWshPath
+
+        with tempfile.TemporaryDirectory() as root:
+            bindir = Path(root) / "bin"
+            bindir.mkdir()
+            (bindir / "wsh").write_text("", encoding="utf-8")
+            self.assertEqual(resolveWshPath({"WAVETERM_WSHBINDIR": str(bindir)}), str(bindir / "wsh"))
+        # 无 bindir 提示且默认路径不存在时返回空串。
+        with tempfile.TemporaryDirectory() as home:
+            with patch("model_fallback_proxy.waveterm_foreground.Path.home", return_value=Path(home)), patch(
+                "model_fallback_proxy.waveterm_foreground.shutil.which", return_value=None
+            ):
+                self.assertEqual(resolveWshPath({}), "")
+
     def test_native_transport_uses_handshake_and_controllerinput(self):
         from model_fallback_proxy.waveterm_foreground import WaveTermNativeTransport
 
