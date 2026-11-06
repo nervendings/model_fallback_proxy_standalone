@@ -606,7 +606,14 @@ class SessionAutoContinueTest(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            watcher = SessionAutoContinue(state_path=state_path, allow_background_fallback=False)
+            # 必须显式给全部路径：默认值指向生产 ~/.local/state，会把测试事件写进真实 events.jsonl。
+            watcher = SessionAutoContinue(
+                session_root=root / "sessions",
+                state_path=state_path,
+                log_root=root / "logs",
+                events_path=root / "events.jsonl",
+                allow_background_fallback=False,
+            )
             remaining = watcher.state["pending_failures"]
             self.assertEqual(len(remaining), 1)
             self.assertEqual(remaining[0]["turn_id"], "turn-fresh")
