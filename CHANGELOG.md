@@ -1,5 +1,15 @@
 # 变更记录
 
+## 0.5.15 - 2026-11-06
+
+- **修确定性闸门漏判**：`Invalid content type: encrypted_content. Supported types...`
+  未被识别为历史密文损坏，被归为 `other`，导致闸门不生效。
+  实测 `01a18eac`（goal 早已 complete）因此被无意义重试 **21 次**。
+- `getFailureSignature` 的 corrupted_history 分支补齐三种变体：
+  `could not be verified` / `hydration failed` / `could not be decrypted` /
+  `invalid content type` + `encrypted_content` 组合。
+- 测试 +2，全量 **94 passed**。
+
 ## 0.5.14 - 2026-11-06
 
 - **放开终端注入白名单**：`ALLOWED_INPUT_PAYLOADS` 从「只允许 `继续\r`」扩为 4 个固定安全指令

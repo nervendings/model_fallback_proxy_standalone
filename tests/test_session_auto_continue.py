@@ -1279,3 +1279,29 @@ class TestFeishuTargetGuard(unittest.TestCase):
             feishu_as="user",
         )
         self.assertEqual(cfg.feishu_as, "bot")
+
+
+class CorruptedHistoryVariantTest(unittest.TestCase):
+    def test_invalid_content_type_counts_as_corrupted(self) -> None:
+        """`Invalid content type: encrypted_content` 也是历史密文损坏。
+
+        2026-11-06 漏判：该错误被归为 other，不在确定性签名集合里，
+        导致 01a18eac 被无意义重试 21 次（goal 早已 complete）。
+        """
+        from model_fallback_proxy.session_auto_continue import DETERMINISTIC_FAILURE_SIGNATURES, getFailureSignature
+
+        err = {"message": '{"error":{"message":"Invalid content type: encrypted_content. Supported types..."}}'}
+        sig = getFailureSignature(err)
+        self.assertEqual(sig, "corrupted_history")
+        self.assertIn(sig, DETERMINISTIC_FAILURE_SIGNATURES)
+
+    def test_other_encrypted_phrases_still_corrupted(self) -> None:
+        from model_fallback_proxy.session_auto_continue import getFailureSignature
+
+        for msg in (
+            "encrypted content for item amsg_x could not be verified",
+            "hydration failed for item",
+            "could not be decrypted or parsed",
+        ):
+            with self.subTest(msg=msg[:30]):
+                self.assertEqual(getFailureSignature({"message": msg}), "corrupted_history")

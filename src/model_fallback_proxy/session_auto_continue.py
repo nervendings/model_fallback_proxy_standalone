@@ -207,7 +207,15 @@ def getFailureSignature(error: Any) -> str:
             return f"http_{status}"
     if "stream disconnected" in text or "stream closed before" in text:
         return "stream_disconnected"
-    if "could not be verified" in text or "hydration failed" in text:
+    # 历史密文损坏的多种表现（服务端逐条 hydrate 失败）。
+    # 2026-11-06 漏判：`Invalid content type: encrypted_content. Supported types...`
+    # 未被识别，被归为 other → 确定性闸门不生效，01a18eac 被无意义重试 21 次。
+    if (
+        "could not be verified" in text
+        or "hydration failed" in text
+        or "could not be decrypted" in text
+        or ("invalid content type" in text and "encrypted_content" in text)
+    ):
         return "corrupted_history"
     if "at capacity" in text or "overloaded" in text:
         return "capacity"
