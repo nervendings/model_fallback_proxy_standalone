@@ -1,5 +1,19 @@
 # 变更记录
 
+## 0.5.16 - 2026-11-06
+
+- **修闸门与签名漂移**（0.5.15 只修了一半）：
+  `getFailureSignature` 已把 `Invalid content type: encrypted_content` 归为 `corrupted_history`，
+  但 `error_classification.isCorruptedHistoryError` 的 `CORRUPTED_HISTORY_MARKERS` 没有同步，
+  `handleFailure` 的「停止自动续跑」闸门因此不生效。
+
+  实测代价：`01a17838`（qwen3.8-flash）在 12:48:47–12:49:48 连败 **5 次**，间隔越缩越短。
+  0.5.15 的测试只覆盖签名函数，测不出这种两处判定的漂移。
+- 补一致性测试：对同一批错误文本断言「签名是 corrupted_history」且「闸门返回 True」，
+  并断言通用 400002 / 400001 不被误伤。
+- 测试 94 → 96。
+
+
 ## 0.5.15 - 2026-11-06
 
 - **修确定性闸门漏判**：`Invalid content type: encrypted_content. Supported types...`

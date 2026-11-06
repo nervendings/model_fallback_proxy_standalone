@@ -33,6 +33,10 @@ CORRUPTED_HISTORY_MARKERS = (
     "hydration failed",
     "could not be decrypted or parsed",
     "encrypted content hydration",
+    # 2026-11-06 实测：qwen3.8-flash 等非 OpenAI 模型收到 OpenAI 的密文 reasoning item
+    # 时返回这条错误；服务端每回合 hydrate 同一批历史条目都会失败，重试无意义。
+    # 必须与 session_auto_continue.getFailureSignature 的判定保持一致。
+    "invalid content type: encrypted_content",
 )
 
 

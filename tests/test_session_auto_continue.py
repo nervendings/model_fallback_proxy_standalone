@@ -1233,6 +1233,38 @@ class SessionAutoContinueTest(unittest.TestCase):
             self.assertEqual(watcher.state["pending_failures"], [])
 
 
+    def test_gate_and_signature_agree_on_all_variants(self) -> None:
+        """两处判定必须一致：签名说 corrupted_history，闸门就必须拦住。
+
+        2026-11-06 实际故障：getFailureSignature 已认 encrypted_content，
+        但 error_classification.isCorruptedHistoryError 的标记表没同步，
+        handleFailure 的「停止续跑」闸门不生效 → 01a17838 在 12:49 连败 5 次。
+        只测其中一个函数永远发现不了这种漂移。
+        """
+        from model_fallback_proxy.error_classification import isCorruptedHistoryError
+        from model_fallback_proxy.session_auto_continue import getFailureSignature
+
+        samples = (
+            '{"error":{"message":"Invalid content type: encrypted_content. Supported types for assistant role are: ' "'"'input_text'"'"', ' "'"'output_text'"'"'.","type":"InvalidParameter"}}',
+            "encrypted content for item amsg_x could not be verified",
+            "hydration failed for item",
+            "could not be decrypted or parsed",
+            "encrypted content hydration failed",
+        )
+        for msg in samples:
+            with self.subTest(msg=msg[:40]):
+                error = {"message": msg}
+                self.assertEqual(getFailureSignature(error), "corrupted_history")
+                self.assertTrue(isCorruptedHistoryError(error))
+
+    def test_unrelated_400002_is_not_corrupted(self) -> None:
+        """不能误伤：通用 400002（input.type 等）可能可恢复，不该被当密文损坏。"""
+        from model_fallback_proxy.error_classification import isCorruptedHistoryError
+
+        self.assertFalse(isCorruptedHistoryError({"message": "400002 input.type invalid"}))
+        self.assertFalse(isCorruptedHistoryError({"message": "400001 read body failed"}))
+
+
 if __name__ == "__main__":
     unittest.main()
 
