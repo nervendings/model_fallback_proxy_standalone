@@ -263,6 +263,15 @@ class TestConfigValidation(unittest.TestCase):
         policy = engine.RouterConfig(cfg).nodePolicy("m_a1")
         self.assertEqual(policy.retryDelaysS(), [0.1, 0.2, 0.3])
 
+    def testFlatNodePolicyOverridesDefaults(self):
+        cfg = self.validBase()
+        cfg["defaults"].update({"retries": 1, "retry_interval_ms": 500})
+        cfg["router"]["m_a1"]["retries"] = 0
+        cfg["router"]["m_a1"]["retry_interval_ms"] = 25
+        policy = engine.RouterConfig(cfg).nodePolicy("m_a1")
+        self.assertEqual(policy.retries, 0)
+        self.assertEqual(policy.retry_interval_ms, 25)
+
 
 class TestSpecialRules(UpstreamHarness):
     """特殊规则：400001 上下文溢出 -> 不重试不冷却，直接换下一节点并发 compact 信号。"""

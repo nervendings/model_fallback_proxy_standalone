@@ -208,7 +208,12 @@ class RouterConfig:
         return None
     def nodePolicy(self, model: str) -> NodePolicy:
         node = self.router.get(model) or {}
-        merged = {**self.defaults, **(node.get("policy") or {})}
+        # 管理台使用平铺字段；旧模板也可能使用 policy 子对象。两种写法都支持，平铺字段优先。
+        overrides = dict(node.get("policy") or {})
+        for key in self.defaults:
+            if key in node:
+                overrides[key] = node[key]
+        merged = {**self.defaults, **overrides}
         return NodePolicy(
             retries=int(merged["retries"]),
             retry_interval_ms=int(merged["retry_interval_ms"]),
