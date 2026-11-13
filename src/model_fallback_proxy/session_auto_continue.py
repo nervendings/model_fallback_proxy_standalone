@@ -1446,6 +1446,11 @@ class SessionAutoContinue:
         repeats = self.recordFailureSignature(session, signature, now)
         if signature in DETERMINISTIC_FAILURE_SIGNATURES and repeats >= REPEATED_FAILURE_LIMIT:
             session["last_action"] = "repeated_failure_gave_up"
+            # 2026-11-13：放弃时把**真实签名**写进 last_failure_kind。
+            # 原来只写 retryable_failure_kind（空）→ 落 "other"，
+            # 体检那边就无法区分「模型名不存在」和「密文损坏」，
+            # 实测 404 探针被误报成「历史密文损坏，需人工开新会话」。
+            session["last_failure_kind"] = signature
             self.clearPendingFailures(session_id)
             logging.warning(
                 "auto-continue gave up on repeated failure session=%s signature=%s repeats=%d",

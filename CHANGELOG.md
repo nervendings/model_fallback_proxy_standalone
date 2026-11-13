@@ -1,5 +1,12 @@
 # 变更记录
 
+## 0.6.5 - 2026-11-13
+
+- 修「闸门放弃时不回填失败签名」：repeated_failure_gave_up 只写空 retryable kind，
+  结果落到 other。体检侧无法区分失败类型 —— 实测 404 model_not_found 探针
+  被报成「1 个会话历史密文损坏，需人工开新会话」，照提示开新会话纯属白费功夫。
+  现在放弃时把真实 signature 写进 last_failure_kind。
+
 ## 0.6.4 - 2026-11-13
 
 - 修「模型不存在」无限续跑：404 model_not_found 之前落 other 签名，不进确定性闸门，

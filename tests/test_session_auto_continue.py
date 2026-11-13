@@ -1192,6 +1192,8 @@ class SessionAutoContinueTest(unittest.TestCase):
                 self.appendFailure(session_file, f"turn-404-{index}", message=message)
                 watcher.scan()
             self.assertEqual(watcher.state["sessions"][SESSION_ID]["last_action"], "repeated_failure_gave_up")
+            # 2026-11-13：放弃时必须回填真实签名，否则体检无法区分失败类型
+            self.assertEqual(watcher.state["sessions"][SESSION_ID]["last_failure_kind"], "model_not_found")
 
     def test_success_resets_consecutive_failure_count(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
