@@ -838,6 +838,10 @@ class SessionAutoContinue:
             file_state["session_id"] = session_id
             originator = str(payload.get("originator") or "").strip()
             file_state["originator"] = originator
+            # session_meta 里已带 provider（headless 会话没有 thread_settings_applied 兜底）。
+            meta_provider = str(payload.get("model_provider") or "").strip()
+            if meta_provider:
+                file_state["model_provider"] = meta_provider
             file_state["watch"] = originator in WATCHED_ORIGINATORS
             if originator in {"codex_exec", "virtual_employee", "roadclaw"}:
                 file_state["frontend_channel"] = "virtual_employee"
@@ -848,6 +852,16 @@ class SessionAutoContinue:
                 model = str(settings.get("model") or "").strip()
                 effort = str(settings.get("reasoning_effort") or settings.get("effort") or "").strip()
                 cwd = str(settings.get("cwd") or "").strip()
+                # 2026-11-13 实测：不给 resume 带上原 provider，codex 会试图改回默认
+                # OpenAI 并直接失败 —— "Cannot change this thread's model provider
+                # from qingyanx to OpenAI on resume"。会话一旦换了 provider 就永久叫不醒。
+                provider = str(
+                    settings.get("model_provider_id")
+                    or settings.get("model_provider")
+                    or ""
+                ).strip()
+                if provider:
+                    file_state["model_provider"] = provider
                 if model:
                     file_state["model"] = model
                 if effort:
@@ -871,7 +885,15 @@ class SessionAutoContinue:
             if cwd:
                 file_state["cwd"] = cwd
 
-    def startResume(self, session_id: str, turn_id: str, model: str, cwd: str, reasoning_effort: str | None = None) -> int:
+    def startResume(
+        self,
+        session_id: str,
+        turn_id: str,
+        model: str,
+        cwd: str,
+        reasoning_effort: str | None = None,
+        model_provider: str | None = None,
+    ) -> int:
         resume_dir = self.log_root / session_id / turn_id
         resume_dir.mkdir(parents=True, exist_ok=True)
         stdout_path = resume_dir / "stdout.log"
@@ -884,6 +906,11 @@ class SessionAutoContinue:
         effective_reasoning_effort = str(reasoning_effort or "").strip() or DEFAULT_REASONING_EFFORT
         if effective_reasoning_effort:
             command.extend(["-c", f'model_reasoning_effort="{effective_reasoning_effort}"'])
+        # 会话已固定在非默认 provider 时必须显式带上：否则 resume 会尝试改回默认
+        # provider 并直接失败（实测 qingyanx → OpenAI 被 codex 拒绝）。
+        effective_provider = str(model_provider or "").strip()
+        if effective_provider:
+            command.extend(["-c", f'model_provider="{effective_provider}"'])
         command.extend([
             "-m",
             model,
@@ -1244,6 +1271,7 @@ class SessionAutoContinue:
             "session_id": session_id,
             "turn_id": turn_id,
             "model": file_state.get("model"),
+            "model_provider": file_state.get("model_provider"),
             "reasoning_effort": file_state.get("reasoning_effort"),
             "cwd": file_state.get("cwd"),
             "frontend_channel": file_state.get("frontend_channel"),
@@ -1294,6 +1322,7 @@ class SessionAutoContinue:
             "watch": True,
             "originator": str(item.get("originator") or "codex-tui"),
             "model": str(item.get("model") or MODEL_CHAIN[0]),
+            "model_provider": str(item.get("model_provider") or ""),
             "reasoning_effort": str(item.get("reasoning_effort") or "").strip(),
             "cwd": str(item.get("cwd") or Path.home()),
             "frontend_channel": str(item.get("frontend_channel") or "auto"),
@@ -1548,6 +1577,7 @@ class SessionAutoContinue:
                 resume_model,
                 str(file_state.get("cwd") or Path.home()),
                 reasoning_effort,
+                str(file_state.get("model_provider") or ""),
             )
         except Exception as exc:
             session["last_action"] = "resume_start_failed"

@@ -1,5 +1,12 @@
 # 变更记录
 
+## 0.6.3 - 2026-11-13
+
+- 修 resume 丢 provider：会话换过 provider（如 qingyanx）后，后台 resume 只传 -m 模型名，
+  codex 会尝试把该线程改回默认 provider 并直接失败（实测 01a1d561：Cannot change this thread model provider from qingyanx to OpenAI on resume）。
+  现在从 session_meta / thread_settings_applied 记录 model_provider，resume 时以 -c model_provider= 带上；
+  pending 队列同步透传，避免排队期间丢失 provider。
+
 ## 0.6.2 - 2026-11-13
 
 - 新增 headless 定向兜底（--allow-headless-resume-fallback / CODEX_AUTO_CONTINUE_HEADLESS_FALLBACK）：

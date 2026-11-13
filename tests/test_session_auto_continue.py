@@ -1132,6 +1132,38 @@ class SessionAutoContinueTest(unittest.TestCase):
             self.assertEqual(commands, [])
             self.assertEqual(watcher.state["sessions"][SESSION_ID]["last_action"], "foreground_observe_only")
 
+    def test_resume_carries_original_model_provider(self) -> None:
+        """会话换过 provider 后 resume 必须带上原 provider，否则 codex 拒绝改回默认。"""
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            session_root = root / "sessions"
+            session_root.mkdir()
+            session_file = session_root / "session.jsonl"
+            session_file.touch()
+            commands: list[FakeProcess] = []
+            watcher = self.makeWatcher(
+                root,
+                commands,
+                allow_background_fallback=False,
+                foreground_adapter=lambda _request: {"status": "observe_only", "reason": "adapter_unavailable"},
+            )
+            watcher.hasLiveWriter = lambda _sid: False  # type: ignore[assignment]
+            writeEvent(
+                session_file,
+                {
+                    "type": "session_meta",
+                    "session_id": SESSION_ID,
+                    "originator": "codex_exec",
+                    "model_provider": "qingyanx",
+                    "cwd": "/tmp",
+                },
+            )
+            self.appendFailure(session_file, "turn-provider")
+            watcher.scan()
+            self.assertEqual(len(commands), 1)
+            argv = commands[0].command
+            self.assertIn('model_provider="qingyanx"', argv)
+
     def test_success_resets_consecutive_failure_count(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)
