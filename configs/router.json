@@ -46,6 +46,15 @@
       "enabled": true,
       "provider_failure_threshold": 3,
       "provider_cooldown_s": 300
+    },
+    "qingyanx": {
+      "name": "青岩中转（自购，限流 8 req/min）",
+      "base_url": "https://api.qingyanx.com/v1",
+      "auth_mode": "bearer",
+      "api_key_env": "QINGYANX_API_KEY",
+      "enabled": true,
+      "provider_failure_threshold": 2,
+      "provider_cooldown_s": 300
     }
   },
   "router": {
@@ -77,9 +86,9 @@
       ]
     },
     "glm-5-3-flash": {
-      "provider": "ark",
-      "remote_model": "glm-5-3-flash-260828",
-      "comment": "自购轻量：公司全挂时的第一兜底",
+      "provider": "qingyanx",
+      "remote_model": "zai-org/glm-5.3-flash",
+      "comment": "自购轻量：公司全挂时的第一兜底（qingyanx，限流 8/min，故 retries=0）",
       "policy": {
         "retries": 0,
         "cooldown_s": 300
@@ -89,9 +98,29 @@
       ]
     },
     "glm-5-3": {
-      "provider": "ark",
-      "remote_model": "glm-5-3",
-      "comment": "自购旗舰：全链最后兜底（根）",
+      "provider": "qingyanx",
+      "remote_model": "zai-org/glm-5.3",
+      "comment": "自购旗舰：全链最后兜底（qingyanx，限流 8/min）",
+      "policy": {
+        "retries": 0,
+        "cooldown_s": 600
+      },
+      "children": []
+    },
+    "zai-org/glm-5.3-flash": {
+      "provider": "qingyanx",
+      "remote_model": "zai-org/glm-5.3-flash",
+      "comment": "models.json 登记名的直通别名（TUI /model 选中即可用）",
+      "policy": {
+        "retries": 0,
+        "cooldown_s": 300
+      },
+      "children": []
+    },
+    "zai-org/glm-5.3": {
+      "provider": "qingyanx",
+      "remote_model": "zai-org/glm-5.3",
+      "comment": "models.json 登记名的直通别名（TUI /model 选中即可用）",
       "policy": {
         "retries": 0,
         "cooldown_s": 600

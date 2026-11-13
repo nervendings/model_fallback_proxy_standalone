@@ -1,5 +1,17 @@
 # 变更记录
 
+## 0.6.1 - 2026-11-13
+
+- 修 GLM 兜底链断裂：glm-5-3-flash / glm-5-3 两个节点的 provider 由 ark 改为 qingyanx。
+  实测 ark 的 CodingPlan 订阅已过期（InvalidSubscription），api/v3 上也未开通 GLM
+  （ModelNotOpen），整条自购兜底是死的；改用青岩中转后两条均实测正常返回。
+- 新增 qingyanx 供应商（https://api.qingyanx.com/v1，bearer + QINGYANX_API_KEY，
+  失败阈值 2、冷却 300s）。因上游限流 8 req/min，GLM 节点保持 retries=0。
+- 新增 zai-org/glm-5.3、zai-org/glm-5.3-flash 两个直通别名节点。
+  models.json 里登记的就是这两个 slug，没有别名时 TUI /model 选中会落到 sub2api 报 404。
+- 同步移除 ~/.codex/model_policy.json 里的 zai-org/glm-5.3* 自动降级项：
+  它们只在 qingyanx provider 下可用，放进默认降级链会让降级变成必然 404。
+
 ## 0.6.0 - 2026-11-13
 
 - 新增多供应商 DAG 路由：默认链路为 gpt-6-astra → deepseek-flash → qwen3.8-flash → Ark GLM，支持节点级重试、指数退避、节点冷却与供应商熔断。
