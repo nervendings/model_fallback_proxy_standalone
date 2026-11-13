@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<!--
+  继续工程师 · 模型降级路由管理台
+  分页：概览 / 降级链路 / 重试策略 / 供应商 / 特殊规则 / 试运行
+  后端：model_fallback_proxy 挂载在 /_fallback/*
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>模型降级路由管理台</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="logo">CE</span>
+      <div class="brand-text">
+        <strong>模型降级路由</strong>
+        <span class="muted small">继续工程师</span>
+      </div>
+    </div>
+    <nav id="nav" class="nav">
+      <a href="#/overview" data-route="overview">概览</a>
+      <a href="#/dag" data-route="dag">降级链路</a>
+      <a href="#/retry" data-route="retry">重试策略</a>
+      <a href="#/providers" data-route="providers">供应商</a>
+      <a href="#/rules" data-route="rules">特殊规则</a>
+      <a href="#/dryrun" data-route="dryrun">试运行</a>
+    </nav>
+    <div class="side-foot">
+      <span class="muted small" id="versionLine">未连接后端</span>
+      <span class="muted small" id="saveHint">无未保存修改</span>
+    </div>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <div class="topbar-title">
+        <h1 id="pageTitle">概览</h1>
+        <p class="muted" id="pageDesc">运行状态、供应商健康与最近的降级事件。</p>
+      </div>
+      <div class="topbar-actions">
+        <button id="btnRefreshStatus" class="btn" type="button">刷新状态</button>
+        <button id="btnReload" class="btn" type="button">重载配置</button>
+        <button id="btnSave" class="btn primary" type="button" disabled>保存配置</button>
+      </div>
+    </header>
+
+    <div id="banner" class="banner hidden" role="alert"></div>
+
+    <main id="content">
+      <!-- 概览 -->
+      <section id="page-overview" class="page">
+        <div class="stat-grid">
+          <div class="stat"><span class="stat-label">请求总数</span><b id="pillRequest">-</b></div>
+          <div class="stat"><span class="stat-label">同节点重试</span><b id="pillRetry">-</b></div>
+          <div class="stat"><span class="stat-label">降级次数</span><b id="pillFallback">-</b></div>
+          <div class="stat"><span class="stat-label">容量失败</span><b id="pillCapacity">-</b></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h2>供应商健康</h2>
+            <p class="hint">最近一次探测或请求的结果；失败会显示原因与时间。</p>
+          </div>
+          <div class="card-body">
+            <div id="healthLights" class="pill-row"></div>
+            <div class="row gap">
+              <button id="btnHealth" class="btn" type="button">一键供应商体检</button>
+              <span class="muted small">体检会请求各供应商的 <code>/v1/models</code>，最多约 10 秒。</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h2>渠道冷却</h2>
+            <p class="hint">失败后进入冷却的 供应商:模型；冷却结束后自动恢复，无需人工干预。</p>
+          </div>
+          <div class="card-body"><div id="cooldownBox" class="pill-row"></div></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h2>最近事件</h2>
+            <p class="hint">最多展示 50 条，倒序。</p>
+          </div>
+          <div class="card-body table-wrap">
+            <table class="data-table" id="eventTable">
+              <thead><tr><th>时间</th><th>从</th><th>到</th><th>类型</th><th>原因</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- 降级链路 -->
+      <section id="page-dag" class="page hidden">
+        <div class="card">
+          <div class="card-head">
+            <h2>降级链路（DAG）</h2>
+            <p class="hint">
+              上方是首选模型，失败后沿箭头向下降级，最下方是最后兜底。
+              一个节点可以有多个降级目标，因此是 DAG；被多条路径指向的节点只展开一次。
+            </p>
+          </div>
+          <div class="card-body">
+            <div class="legend">
+              <span><b>↑ 上方</b> = 首选（最先尝试，通常是免费渠道）</span>
+              <span><b>↓ 下方</b> = 兜底（最后尝试，通常是自付费渠道）</span>
+              <span>卡片内「降级去向 →」是 children，「被谁降级进来 ←」是反向邻接</span>
+            </div>
+            <div class="toolbar">
+              <div class="inline-form">
+                <input id="newNodeName" type="text" placeholder="新模型名，如 glm-5-3-flash">
+                <select id="newNodeProvider"></select>
+                <button id="btnAddNode" class="btn small" type="button">新增模型节点</button>
+              </div>
+              <a class="link small" href="#/providers">管理供应商</a>
+            </div>
+            <div id="providersBox" class="pill-row"></div>
+            <div id="forest" class="forest"></div>
+            <div id="forestEmpty" class="empty hidden">还没有任何模型节点，先用上面的表单新增一个入口模型。</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 重试策略 -->
+      <section id="page-retry" class="page hidden">
+        <div class="card">
+          <div class="card-head">
+            <h2>全局默认参数</h2>
+            <p class="hint">节点上没有单独填写的项，全部继承这里。</p>
+          </div>
+          <div class="card-body"><div id="defaultsGrid" class="form-grid"></div></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h2>HTTP 状态码</h2>
+            <p class="hint">命中这些状态码时按配置重试或降级；未勾选的异常直接原样返回客户端。</p>
+          </div>
+          <div class="card-body">
+            <div id="statusQuick" class="tags quick"></div>
+            <div id="statusTags" class="tags"></div>
+            <div class="inline-form">
+              <input id="newStatus" type="number" min="100" max="599" placeholder="如 504" inputmode="numeric">
+              <button id="btnAddStatus" class="btn small" type="button">添加状态码</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h2>错误类别（按响应正文关键词识别）</h2>
+            <p class="hint">与状态码是「或」的关系；后两类是确定性错误，重试通常无意义。</p>
+          </div>
+          <div class="card-body"><div id="keywordList" class="kw-list"></div></div>
+        </div>
+      </section>
+
+      <!-- 供应商 -->
+      <section id="page-providers" class="page hidden">
+        <div class="card">
+          <div class="card-head">
+            <h2>供应商</h2>
+            <p class="hint">只填密钥的环境变量名，永远不要把密钥本身写进这里。</p>
+          </div>
+          <div class="card-body">
+            <div id="providerList" class="provider-list"></div>
+            <div class="divider"></div>
+            <div class="inline-form">
+              <input id="newProviderName" type="text" placeholder="供应商名，如 ark">
+              <input id="newProviderUrl" type="text" placeholder="base_url">
+              <input id="newProviderEnv" type="text" placeholder="api_key_env（变量名）">
+              <button id="btnAddProvider" class="btn small" type="button">添加供应商</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 特殊规则 -->
+      <section id="page-rules" class="page hidden">
+        <div class="card">
+          <div class="card-head">
+            <h2>特殊规则</h2>
+            <p class="hint">
+              命中特殊规则时优先于普通 http_status / keywords 判定。
+              未勾选 cooldown_node 时不冷却该节点 —— 换模型或压缩上下文才是正解，冷却无意义。
+            </p>
+          </div>
+          <div class="card-body">
+            <div id="rulesBox" class="rule-list"></div>
+            <button id="btnAddRule" class="btn small" type="button">新增规则</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 试运行 -->
+      <section id="page-dryrun" class="page hidden">
+        <div class="card">
+          <div class="card-head">
+            <h2>试运行（只读，不发请求）</h2>
+            <p class="hint">按当前 DAG、每节点重试参数与实时冷却状态，算出会依次执行的全部尝试。</p>
+          </div>
+          <div class="card-body">
+            <div class="toolbar">
+              <div class="inline-form">
+                <label class="muted" for="simEntry">入口模型</label>
+                <select id="simEntry"></select>
+                <label class="check"><input id="simIgnoreCooldown" type="checkbox"> 忽略冷却状态</label>
+                <button id="btnSimulate" class="btn small" type="button">试运行</button>
+              </div>
+              <div class="muted small" id="simSummary"></div>
+            </div>
+            <div class="table-wrap">
+              <table class="data-table" id="simTable">
+                <thead><tr><th>#</th><th>模型</th><th>供应商</th><th>第几次尝试</th><th>等待间隔</th><th>累计耗时</th><th>说明</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+<script src="app.js"></script>
+</body>
+</html>

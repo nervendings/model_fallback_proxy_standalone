@@ -1,0 +1,134 @@
+{
+  "policy_version": 1,
+  "comment": "叶子=首选渠道（公司 sub2api 免费），根=最后兜底（自购 Ark）。降级方向：叶子 -> 根。",
+  "defaults": {
+    "retries": 1,
+    "retry_interval_ms": 500,
+    "backoff_multiplier": 2.0,
+    "max_retry_interval_ms": 5000,
+    "connect_timeout_s": 15,
+    "first_byte_timeout_s": 60,
+    "cooldown_s": 180
+  },
+  "retry_on": {
+    "http_status": [
+      408,
+      429,
+      500,
+      502,
+      503,
+      529
+    ],
+    "keywords": {
+      "capacity": true,
+      "network_error": true,
+      "stream_break": true,
+      "model_not_found": true,
+      "auth_error": false,
+      "corrupted_history": false
+    }
+  },
+  "providers": {
+    "sub2api": {
+      "name": "公司 Sub2API（免费不限量，不稳定）",
+      "base_url": "https://sub2api.minieye.tech",
+      "auth_mode": "passthrough",
+      "api_key_env": "",
+      "enabled": true,
+      "provider_failure_threshold": 2,
+      "provider_cooldown_s": 120
+    },
+    "ark": {
+      "name": "火山方舟 Coding Plan（自购，稳定按量）",
+      "base_url": "https://ark.cn-beijing.volces.com/api/coding/v3",
+      "auth_mode": "bearer",
+      "api_key_env": "ARK_API_KEY",
+      "enabled": true,
+      "provider_failure_threshold": 3,
+      "provider_cooldown_s": 300
+    }
+  },
+  "router": {
+    "gpt-6-astra": {
+      "provider": "sub2api",
+      "comment": "第一链路：astra -> deepseek -> qwen -> 自购",
+      "children": [
+        "deepseek-flash",
+        "qwen3.8-flash",
+        "glm-5-3-flash",
+        "glm-5-3"
+      ]
+    },
+    "deepseek-flash": {
+      "provider": "sub2api",
+      "comment": "日常开发与子代理主力（公司免费）",
+      "children": [
+        "qwen3.8-flash",
+        "glm-5-3-flash",
+        "glm-5-3"
+      ]
+    },
+    "qwen3.8-flash": {
+      "provider": "sub2api",
+      "comment": "公司第二选择",
+      "children": [
+        "glm-5-3-flash",
+        "glm-5-3"
+      ]
+    },
+    "glm-5-3-flash": {
+      "provider": "ark",
+      "remote_model": "glm-5-3-flash-260828",
+      "comment": "自购轻量：公司全挂时的第一兜底",
+      "policy": {
+        "retries": 0,
+        "cooldown_s": 300
+      },
+      "children": [
+        "glm-5-3"
+      ]
+    },
+    "glm-5-3": {
+      "provider": "ark",
+      "remote_model": "glm-5-3",
+      "comment": "自购旗舰：全链最后兜底（根）",
+      "policy": {
+        "retries": 0,
+        "cooldown_s": 600
+      },
+      "children": []
+    }
+  },
+  "special_rules": [
+    {
+      "name": "context_overflow",
+      "patterns": [
+        "400001",
+        "read body failed",
+        "context_length_exceeded",
+        "maximum context length",
+        "range of input length"
+      ],
+      "actions": [
+        "switch_next",
+        "signal_compact"
+      ],
+      "cooldown": false,
+      "enabled": true
+    },
+    {
+      "name": "corrupted_history",
+      "patterns": [
+        "could not be decrypted or parsed",
+        "invalid content type: encrypted_content",
+        "encrypted content hydration",
+        "hydration failed"
+      ],
+      "actions": [
+        "signal_new_session"
+      ],
+      "cooldown": false,
+      "enabled": true
+    }
+  ]
+}

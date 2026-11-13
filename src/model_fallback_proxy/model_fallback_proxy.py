@@ -326,6 +326,9 @@ async def writeStreamResponse(
         headers=filterResponseHeaders(upstream.headers),
     )
     await downstream.prepare(request)
+    onStarted = getattr(state, "onStreamStarted", None)
+    if callable(onStarted):
+        onStarted(model_name, downstream)
     if initial_body:
         await downstream.write(initial_body)
 
@@ -352,18 +355,30 @@ async def writeStreamResponse(
                 capacity_observed = True
                 return True
 
-    async for chunk in upstream.content.iter_any():
-        if chunk:
+    try:
+        async for chunk in upstream.content.iter_any():
+            if chunk:
+                try:
+                    await downstream.write(chunk)
+                except ConnectionResetError:
+                    logging.warning("downstream closed while streaming model=%s", model_name)
+                    upstream.release()
+                    return downstream
+                if not capacity_observed:
+                    event_buffer.extend(chunk)
+                    consumeCompletedEvents()
+                    if len(event_buffer) > MAX_INSPECTION_BYTES:
+                        event_buffer.clear()
+    except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
+        # 上游半路断开且已吐字节：交给路由层在已准备的流上补错误事件收尾。
+        onBreak = getattr(state, "onStreamBreak", None)
+        if callable(onBreak):
             try:
-                await downstream.write(chunk)
-            except ConnectionResetError:
-                logging.warning("downstream closed while streaming model=%s", model_name)
-                return downstream
-            if not capacity_observed:
-                event_buffer.extend(chunk)
-                consumeCompletedEvents()
-                if len(event_buffer) > MAX_INSPECTION_BYTES:
-                    event_buffer.clear()
+                return await onBreak(exc, downstream, model_name)
+            finally:
+                upstream.release()
+        upstream.release()
+        raise
     if not capacity_observed and event_buffer and isCapacitySseEvent(bytes(event_buffer)):
         state.markCapacity(model_name)
         logging.warning("capacity observed after output model=%s; skipping on next request", model_name)
@@ -374,6 +389,7 @@ async def writeStreamResponse(
         await downstream.write_eof()
     except ConnectionResetError:
         logging.warning("downstream closed before eof model=%s", model_name)
+    upstream.release()
     return downstream
 
 
@@ -564,6 +580,12 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     listen_host = os.getenv("CODEX_FALLBACK_LISTEN_HOST", DEFAULT_LISTEN_HOST)
     listen_port = int(os.getenv("CODEX_FALLBACK_LISTEN_PORT", DEFAULT_LISTEN_PORT))
+    if os.getenv("CODEX_ROUTER_ENABLE", "0") == "1":
+        from .router_engine import createRoutedApp
+        logging.info("model fallback proxy starting in DAG router mode host=%s port=%d",
+                     listen_host, listen_port)
+        web.run_app(createRoutedApp(), host=listen_host, port=listen_port, access_log=None)
+        return
     logging.info("model fallback proxy starting host=%s port=%d", listen_host, listen_port)
     web.run_app(createApp(), host=listen_host, port=listen_port, access_log=None)
 

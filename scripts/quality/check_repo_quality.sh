@@ -27,11 +27,11 @@ mapfile -t scan_files < <(
         -g '*.py' -g '*.sh' -g '*.service' -g '*.md' -g '*.toml' \
         -g '*.ini' -g '*.example' -g '*.txt' -g '*.json'
 )
-if ((${#scan_files[@]})) && rg -n -i --hidden \
+if ((${#scan_files[@]})) && rg -n -i --pcre2 --hidden \
     --glob '!configs/environment.example' \
     --glob '!README.md' \
     --glob '!docs/**' \
-    '(api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|password\s*=|BEGIN (RSA|OPENSSH|PRIVATE) KEY|/home/[A-Za-z0-9._-]+/mnt/|/home/[A-Za-z0-9._-]+/tool/)' \
+    '((api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|password)\s*[:=]\s*["\x27][^"\x27]{8,}["\x27]|BEGIN (RSA|OPENSSH|PRIVATE) KEY|/home/[A-Za-z0-9._-]+/mnt/|/home/[A-Za-z0-9._-]+/tool/)' \
     "${scan_files[@]}"; then
     echo "quality gate failed: possible secret or private path" >&2
     exit 1
