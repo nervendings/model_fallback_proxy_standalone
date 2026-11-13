@@ -19,6 +19,7 @@ try:
         getRetryableModelFailureKind,
         isCapacityText,
         isCorruptedHistoryError,
+        isModelNotFoundError,
     )
 except ImportError:  # pragma: no cover - 兼容直接执行源码文件。
     from error_classification import (
@@ -26,6 +27,7 @@ except ImportError:  # pragma: no cover - 兼容直接执行源码文件。
         getRetryableModelFailureKind,
         isCapacityText,
         isCorruptedHistoryError,
+        isModelNotFoundError,
     )
 
 
@@ -130,6 +132,7 @@ DETERMINISTIC_FAILURE_SIGNATURES = frozenset(
         "400001_body",
         "corrupted_history",
         "context_window",
+        "model_not_found",
     }
 )
 SESSION_TAIL_SCAN_BYTES = 262144
@@ -213,6 +216,9 @@ def getFailureSignature(error: Any) -> str:
         return "unknown"
     if "400001" in text or "read body failed" in text:
         return "400001_body"
+    # 模型不存在：确定性失败。不单独归类的话会落 other，不触发闸门 → 无限续跑。
+    if isModelNotFoundError(error):
+        return "model_not_found"
     for status in ("502", "503", "429", "529", "500", "504"):
         if f"status {status}" in text or f" {status} " in text:
             return f"http_{status}"

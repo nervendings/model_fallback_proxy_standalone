@@ -39,6 +39,18 @@ CORRUPTED_HISTORY_MARKERS = (
     "invalid content type: encrypted_content",
 )
 
+# 模型/端点在服务端根本不存在：重试、续跑、换 reasoning 都不会自愈。
+# 2026-11-13 实测：故意用 no-such-model-probe 触发 404，
+# 旧逻辑把它归为 other → 非确定性闸门不生效 → auto-continue 无限续跑。
+MODEL_NOT_FOUND_MARKERS = (
+    "is not supported by any configured account",
+    "model_not_found",
+    "model not found",
+    "does not exist or you do not have access",
+    "the model or endpoint",
+    "invalid model",
+)
+
 
 def normalizeErrorText(raw_value: Any) -> str:
     """扁平化结构化错误，并收敛终端换行和多余空白。"""
@@ -90,3 +102,11 @@ def isCorruptedHistoryError(raw_value: Any) -> bool:
         return False
     # 只匹配密文水合失败的明确特征；通用 400002（input.type/tool.type 等）可能可恢复，不能误伤。
     return any(marker in normalized for marker in CORRUPTED_HISTORY_MARKERS)
+
+
+def isModelNotFoundError(raw_value: Any) -> bool:
+    """模型或端点不存在：确定性失败，续跑无法自愈，应停止并提示换模型。"""
+    normalized = normalizeErrorText(raw_value)
+    if not normalized:
+        return False
+    return any(marker in normalized for marker in MODEL_NOT_FOUND_MARKERS)

@@ -1164,6 +1164,35 @@ class SessionAutoContinueTest(unittest.TestCase):
             argv = commands[0].command
             self.assertIn('model_provider="qingyanx"', argv)
 
+    def test_model_not_found_is_deterministic_and_gives_up(self) -> None:
+        """模型不存在属确定性失败：同一会话重复出现时必须停止续跑，不能无限重试。"""
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            session_root = root / "sessions"
+            session_root.mkdir()
+            session_file = session_root / "session.jsonl"
+            session_file.touch()
+            commands: list[FakeProcess] = []
+            clock = [1000.0]
+            watcher = self.makeWatcher(
+                root,
+                commands,
+                allow_background_fallback=False,
+                foreground_adapter=lambda _request: {"status": "observe_only", "reason": "adapter_unavailable"},
+                time_fn=lambda: clock[0],
+            )
+            watcher.hasLiveWriter = lambda _sid: False  # type: ignore[assignment]
+            self.appendMetadata(session_file, originator="codex_exec")
+            message = (
+                'unexpected status 404 Not Found: Model "no-such-model" is not supported '
+                "by any configured account in this group"
+            )
+            for index in range(6):
+                clock[0] += 10.0
+                self.appendFailure(session_file, f"turn-404-{index}", message=message)
+                watcher.scan()
+            self.assertEqual(watcher.state["sessions"][SESSION_ID]["last_action"], "repeated_failure_gave_up")
+
     def test_success_resets_consecutive_failure_count(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)

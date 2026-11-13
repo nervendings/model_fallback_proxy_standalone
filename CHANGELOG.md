@@ -1,5 +1,12 @@
 # 变更记录
 
+## 0.6.4 - 2026-11-13
+
+- 修「模型不存在」无限续跑：404 model_not_found 之前落 other 签名，不进确定性闸门，
+  auto-continue 会一直 resume 下去（实测 no-such-model-probe 会话反复续跑）。
+  现新增 error_classification.isModelNotFoundError 与 model_not_found 签名，
+  并加入 DETERMINISTIC_FAILURE_SIGNATURES；同一签名 6 次/小时即停止并提示换模型。
+
 ## 0.6.3 - 2026-11-13
 
 - 修 resume 丢 provider：会话换过 provider（如 qingyanx）后，后台 resume 只传 -m 模型名，
