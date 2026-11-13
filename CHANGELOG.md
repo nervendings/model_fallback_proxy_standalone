@@ -1,5 +1,15 @@
 # 变更记录
 
+## 0.6.2 - 2026-11-13
+
+- 新增 headless 定向兜底（--allow-headless-resume-fallback / CODEX_AUTO_CONTINUE_HEADLESS_FALLBACK）：
+  codex exec、子代理、虚拟员工这类会话根本没有可注入终端，前台适配器永远返回 observe_only，
+  在「后台兜底全局关闭」下失败即等于放弃 —— 实测近 2h 6 个失败会话里 5 个是这种。
+  新开关只对 headless 来源 + hasLiveWriter 判活为假时后台 resume；用户 TUI 仍走前台注入。
+- hasLiveWriter：扫 /proc/*/fd 找 rollout 持有者 + 扫 codex 进程 argv 找 thread_id，
+  覆盖「TUI 持 SQLite writer 锁但不持有 rollout fd」的活法；空 session_id 一律判活（宁可不 resume）。
+- 补两条回归：headless 无写入者时 resume；headless 有写入者时绝不动。
+
 ## 0.6.1 - 2026-11-13
 
 - 修 GLM 兜底链断裂：glm-5-3-flash / glm-5-3 两个节点的 provider 由 ark 改为 qingyanx。

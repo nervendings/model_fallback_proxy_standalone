@@ -84,6 +84,7 @@ class SessionAutoContinueTest(unittest.TestCase):
         root: Path,
         commands: list[FakeProcess],
         allow_background_fallback: bool = True,
+        allow_headless_resume_fallback: bool = True,
         foreground_adapter: Any | None = None,
         feishu_notify: bool = False,
         notification_sender: Any | None = None,
@@ -105,6 +106,7 @@ class SessionAutoContinueTest(unittest.TestCase):
             time_fn=time_fn or __import__("time").time,
             foreground_adapter=foreground_adapter,
             allow_background_fallback=allow_background_fallback,
+            allow_headless_resume_fallback=allow_headless_resume_fallback,
             feishu_notify=feishu_notify,
             notification_sender=notification_sender,
             notification_interval_seconds=notification_interval_seconds,
@@ -1086,6 +1088,49 @@ class SessionAutoContinueTest(unittest.TestCase):
             watcher.scan()
             self.assertEqual(len(commands), 1)
             self.assertEqual(watcher.state["sessions"][SESSION_ID]["last_action"], "background_continued")
+
+    def test_headless_session_resumes_when_no_live_writer(self) -> None:
+        """headless 会话没有终端可注入，靠定向兜底 resume；有活写入者时绝不抢。"""
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            session_root = root / "sessions"
+            session_root.mkdir()
+            session_file = session_root / "session.jsonl"
+            session_file.touch()
+            commands: list[FakeProcess] = []
+            watcher = self.makeWatcher(
+                root,
+                commands,
+                allow_background_fallback=False,
+                foreground_adapter=lambda _request: {"status": "observe_only", "reason": "adapter_unavailable"},
+            )
+            watcher.hasLiveWriter = lambda _sid: False  # type: ignore[assignment]
+            self.appendMetadata(session_file, originator="codex_exec")
+            self.appendFailure(session_file, "turn-headless")
+            watcher.scan()
+            self.assertEqual(len(commands), 1)
+            self.assertEqual(watcher.state["sessions"][SESSION_ID]["last_action"], "background_continued")
+
+    def test_headless_session_does_not_steal_live_writer(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            session_root = root / "sessions"
+            session_root.mkdir()
+            session_file = session_root / "session.jsonl"
+            session_file.touch()
+            commands: list[FakeProcess] = []
+            watcher = self.makeWatcher(
+                root,
+                commands,
+                allow_background_fallback=False,
+                foreground_adapter=lambda _request: {"status": "observe_only", "reason": "adapter_unavailable"},
+            )
+            watcher.hasLiveWriter = lambda _sid: True  # type: ignore[assignment]
+            self.appendMetadata(session_file, originator="codex_exec")
+            self.appendFailure(session_file, "turn-headless-busy")
+            watcher.scan()
+            self.assertEqual(commands, [])
+            self.assertEqual(watcher.state["sessions"][SESSION_ID]["last_action"], "foreground_observe_only")
 
     def test_success_resets_consecutive_failure_count(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:

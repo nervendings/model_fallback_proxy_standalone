@@ -37,6 +37,17 @@ DEFAULT_CODEX_BIN = Path(shutil.which("codex") or "codex")
 DEFAULT_PROMPT = "继续"
 DEFAULT_REASONING_EFFORT = "xhigh"
 DEFAULT_BACKGROUND_FALLBACK = False
+# 2026-11-13：headless（codex exec / 子代理 / 虚拟员工）会话没有终端可注入，
+# 前台适配器永远返回 observe_only —— 若还按全局开关一律不兜底，这些会话失败后
+# 就只能等人工。实测近 2h 有 6 个会话失败，其中 5 个是 headless。
+# 语义仍保守：只对 headless + 确认没有活写入者时才后台 resume。
+DEFAULT_HEADLESS_RESUME_FALLBACK = False
+
+# 有活跃 writer 时后台 resume 必撞 thread-store conflict；这些标记用于判活。
+WRITER_CONFLICT_MARKERS = (
+    "already has an active writer",
+    "thread-store conflict",
+)
 DEFAULT_NOTIFICATION_CHANNEL = "local"
 DEFAULT_LINUX_NOTIFY = True
 DEFAULT_NOTIFY_BIN = Path("notify-send")
@@ -311,6 +322,7 @@ class SessionAutoContinue:
         time_fn: Callable[[], float] = time.time,
         foreground_adapter: Callable[[dict[str, Any]], dict[str, Any]] | Any | None = None,
         allow_background_fallback: bool = DEFAULT_BACKGROUND_FALLBACK,
+        allow_headless_resume_fallback: bool = DEFAULT_HEADLESS_RESUME_FALLBACK,
         feishu_notify: bool | None = None,
         feishu_chat_id: str | None = None,
         feishu_as: str | None = None,
@@ -331,6 +343,7 @@ class SessionAutoContinue:
         self.time_fn = time_fn
         self.foreground_adapter = foreground_adapter
         self.allow_background_fallback = allow_background_fallback
+        self.allow_headless_resume_fallback = allow_headless_resume_fallback
         self.notification_channel = self.resolveNotificationChannel(
             notification_channel=notification_channel,
             feishu_notify=feishu_notify,
@@ -760,6 +773,56 @@ class SessionAutoContinue:
         session = self.getSessionState(session_id)
         active = session.get("active")
         return isinstance(active, dict) and self.isProcessAlive(int(active.get("pid") or 0))
+
+    @staticmethod
+    def isHeadlessOriginator(originator: str) -> bool:
+        """headless 会话没有可注入终端：失败后只能靠后台 resume 恢复。"""
+        return str(originator or "").strip().lower() in {
+            "codex_exec",
+            "virtual_employee",
+            "roadclaw",
+        }
+
+    def hasLiveWriter(self, session_id: str) -> bool:
+        """会话是否仍被活进程持有写入权（TUI/另一路 exec）。
+
+        判据优先级与 leo_alarm.inject.sessionAlive 保持一致：
+        1. 有进程打开着该会话的 rollout 文件 → 活着；
+        2. 有 codex 进程 argv 里带该 thread_id → 活着（TUI 持 SQLite writer 锁的典型形态）。
+        只扫 /proc，不读数据库；不确定时返回 True（宁可不 resume，也不抢活会话）。
+        """
+        sid = str(session_id or "").strip()
+        if not sid:
+            return True
+        marker = sid.encode()
+        try:
+            pids = [name for name in os.listdir("/proc") if name.isdigit()]
+        except OSError:
+            return True
+        for pid in pids:
+            fd_dir = "/proc/" + pid + "/fd"
+            try:
+                fds = os.listdir(fd_dir)
+            except OSError:
+                continue
+            for fd in fds:
+                try:
+                    target = os.readlink(fd_dir + "/" + fd)
+                except OSError:
+                    continue
+                if target.endswith(".jsonl") and marker in target.encode():
+                    return True
+        for pid in pids:
+            try:
+                raw = open("/proc/" + pid + "/cmdline", "rb").read()
+            except OSError:
+                continue
+            if marker not in raw:
+                continue
+            argv0 = raw.split(b"\x00", 1)[0].decode("utf-8", "replace")
+            if os.path.basename(argv0).startswith("codex"):
+                return True
+        return False
 
     def updateMetadata(self, file_state: dict[str, Any], payload: dict[str, Any]) -> None:
         event_type = payload.get("type")
@@ -1454,7 +1517,20 @@ class SessionAutoContinue:
                 "warning",
             )
             return
-        fallback_allowed = self.allow_background_fallback and foreground_status in {"observe_only", "failed"}
+        foreground_failed = foreground_status in {"observe_only", "failed"}
+        fallback_allowed = self.allow_background_fallback and foreground_failed
+        headless_fallback = False
+        if not fallback_allowed and foreground_failed:
+            # headless 会话（codex exec / 子代理 / 虚拟员工）根本没有可注入终端：
+            # 前台适配器只会返回 observe_only。这类会话必须允许后台 resume，
+            # 否则「监控所有 codex 对话，中断就修复继续」对它们完全不生效。
+            # 安全边界：只认 headless 来源 + 确认没有活写入者，绝不抢用户 TUI。
+            headless_fallback = bool(
+                self.allow_headless_resume_fallback
+                and self.isHeadlessOriginator(str(file_state.get("originator") or ""))
+                and not self.hasLiveWriter(session_id)
+            )
+        fallback_allowed = fallback_allowed or headless_fallback
         if not fallback_allowed:
             session["last_action"] = "foreground_" + (foreground_status or "unavailable")
             session["foreground"] = foreground_result
@@ -1584,6 +1660,12 @@ def parseArgs() -> argparse.Namespace:
         help="前台适配器 observe_only/failed 时允许后台 codex exec resume 兜底",
     )
     parser.add_argument(
+        "--allow-headless-resume-fallback",
+        action="store_true",
+        default=isEnabled(os.environ.get("CODEX_AUTO_CONTINUE_HEADLESS_FALLBACK")),
+        help="headless 会话（codex exec/子代理/虚拟员工）且无活写入者时允许后台 resume",
+    )
+    parser.add_argument(
         "--feishu-notify",
         action="store_true",
         default=(
@@ -1681,6 +1763,7 @@ def main() -> int:
         poll_seconds=args.poll_seconds,
         foreground_adapter=foreground_adapter,
         allow_background_fallback=args.allow_background_fallback,
+        allow_headless_resume_fallback=args.allow_headless_resume_fallback,
         feishu_notify=args.feishu_notify,
         feishu_chat_id=args.feishu_chat_id,
         feishu_as=args.feishu_as,
