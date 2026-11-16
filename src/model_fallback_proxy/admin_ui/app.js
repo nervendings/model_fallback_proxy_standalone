@@ -591,6 +591,23 @@
       warnings.push('最长降级路径为 ' + (edges + 1) + ' 层节点，建议不超过 6 层，否则单次失败会等待很久。');
     }
     if (!entryModels(config).length) { warnings.push('没有首选模型，客户端请求会找不到路由。'); }
+    var routerNames = Object.keys(config.router || {});
+    if (routerNames.length < 2) {
+      warnings.push('路由表只有 ' + routerNames.length + ' 个节点，等于没有降级链：任何失败都不会切到别的渠道。');
+    } else {
+      var reachable = {};
+      (function markReachable(list) {
+        list.forEach(function (name) {
+          if (!config.router[name] || reachable[name]) { return; }
+          reachable[name] = true;
+          markReachable(config.router[name].children || []);
+        });
+      })(entryModels(config));
+      var orphans = routerNames.filter(function (name) { return !reachable[name]; });
+      if (orphans.length) {
+        warnings.push('这些节点没有上游入口，只有客户端直接指定时才用得到：' + orphans.join('、'));
+      }
+    }
     var disabled = Object.keys(config.providers || {}).filter(function (name) {
       return config.providers[name].enabled === false;
     });
