@@ -40,17 +40,37 @@ class Ark41RouteTest(unittest.TestCase):
         # 必须是专用 key，不能和 coding plan 共用 ARK_API_KEY
         self.assertEqual(provider["api_key_env"], "ARK_AI_API_KEY")
 
-    def test_falls_back_to_company_chain(self):
-        children = self.cfg["router"][SLUG]["children"]
-        self.assertIn("deepseek-flash", children,
-                      "方舟抖动时必须能回落公司链路，否则会话直接中断")
+    def test_is_final_sink(self):
+        """全链最后一站：不能有 children，且其它根节点都应指向它。"""
+        self.assertEqual(self.cfg["router"][SLUG]["children"], [],
+                         "最后一站不能有下级，否则它不是终点")
+        sinks = [k for k, v in self.cfg["router"].items() if not v.get("children")]
+        self.assertEqual(sinks, [SLUG], "应当只有这一个 sink：%s" % sinks)
 
-    def test_not_in_auto_downgrade_chain(self):
-        """不进 CODEX_FALLBACK_MODEL_CHAIN：新模型不该改变现有档位策略。"""
-        env = ROOT / "configs" / "model_chain.env"
-        if not env.exists():
-            self.skipTest("无 model_chain.env")
-        self.assertNotIn(SLUG, env.read_text(encoding="utf-8"))
+    def test_former_sinks_now_point_to_it(self):
+        for name in ("glm-5-3", "zai-org/glm-5.3", "zai-org/glm-5.3-flash"):
+            self.assertIn(SLUG, self.cfg["router"][name]["children"],
+                          "%s 应把 %s 作为最后兜底" % (name, SLUG))
+
+    def test_is_last_in_auto_downgrade_chain(self):
+        """自动降级链（auto-continue 用的 model_chain）末位必须也是它。
+
+        两套机制并存：DAG 管请求层降级，model_chain 管会话续跑/切档。
+        「最后一站」要在两处同时成立，否则一方会在别的模型上停住。
+        """
+        import json as _json
+        policy = _json.loads(
+            (Path.home() / ".codex" / "model_policy.json").read_text(encoding="utf-8"))
+        chain = policy.get("fallback") or []
+        self.assertTrue(chain, "model_policy.fallback 不能为空")
+        self.assertEqual(chain[-1], SLUG, "降级链末位应为 %s，实际 %s" % (SLUG, chain[-1]))
+        self.assertEqual(len(chain), len(set(chain)), "降级链不应有重复模型")
+
+    def test_every_gateway_has_health_path(self):
+        """体检路径必须逐渠道显式配置（2026-11-16 四个渠道全红的根因）。"""
+        for name, provider in self.cfg["providers"].items():
+            self.assertTrue(provider.get("health_path"),
+                            "%s 缺 health_path，体检会因拼错路径误报 404" % name)
 
 
 if __name__ == "__main__":

@@ -848,30 +848,90 @@ async def handleAdminConfigPut(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+def defaultHealthPath(base: str) -> str:
+    """按 base_url 推断模型列表路径：已含 /v1 用 /models，否则 /v1/models。"""
+    return "/models" if base.rstrip("/").endswith("/v1") else "/v1/models"
+
+
+def buildHealthHeaders(provider: dict[str, Any], inbound_auth: str = "") -> dict[str, str]:
+    """体检鉴权：bearer 读 api_key_env，passthrough 透传客户端 Authorization。
+
+    2026-11-16：原来完全不带头，需要 key 的渠道一律 401，管理台四个渠道全红、
+    全是假故障，健康灯失去意义。
+    """
+    headers = {"Accept": "application/json"}
+    if str(provider.get("auth_mode") or "passthrough") == "bearer":
+        key_env = str(provider.get("api_key_env") or "").strip()
+        api_key = os.environ.get(key_env, "").strip() if key_env else ""
+        if api_key:
+            headers["Authorization"] = "Bearer " + api_key
+        return headers
+    if inbound_auth:
+        headers["Authorization"] = inbound_auth
+        return headers
+    # passthrough 渠道（把客户端 key 原样转发）自身没有固定凭据，管理台体检
+    # 拿不到客户端头时，用 health_api_key_env 指定的本机 key 自证渠道可用。
+    # 不配就保持无鉴权探测，401 会如实报警（不掩盖问题）。
+    key_env = str(provider.get("health_api_key_env") or "").strip()
+    api_key = os.environ.get(key_env, "").strip() if key_env else ""
+    if api_key:
+        headers["Authorization"] = "Bearer " + api_key
+    return headers
+
+
 async def handleAdminHealthCheck(request: web.Request) -> web.Response:
+    """逐供应商探测可用性，结果同步写入运行态 provider_health。
+
+    2026-11-16 修正（管理台四个渠道全红、全是假故障）：
+      1. 原代码写死 base_url + /v1/models。方舟官方是 /api/v3/models，拼出来是
+         /api/v3/v1/models 必然 404 —— 红灯是探测写错，不是渠道坏。改为 providers
+         可配 health_path，缺省按 base_url 是否已含 /v1 推断。
+      2. 原代码不带任何鉴权，需要 key 的渠道一律 401，健康灯永远红。改为按
+         auth_mode 带凭据（bearer 读 api_key_env，passthrough 透传客户端头）。
+      3. 404 与 401 必须分开：前者是探测路径配错（ok=None），后者才是渠道真实
+         不可用。ok=None 不得写进熔断用健康态，否则会误熔断整条链路。
+    """
     state: RouterState = request.app[ROUTER_STATE_KEY]
     session: aiohttp.ClientSession = request.app[CLIENT_SESSION_KEY]
+    inbound_auth = request.headers.get("Authorization", "")
     results: list[dict[str, Any]] = []
     for name, provider in state.config.providers.items():
         started = time.monotonic()
         entry: dict[str, Any] = {"provider": name, "ok": False, "latency_ms": None, "detail": ""}
         try:
             base = str(provider.get("base_url", "")).rstrip("/")
+            path = str(provider.get("health_path") or defaultHealthPath(base))
+            headers = buildHealthHeaders(provider, inbound_auth)
             timeout = aiohttp.ClientTimeout(total=10, connect=5, sock_connect=5, sock_read=8)
-            async with session.get(base + "/v1/models", timeout=timeout) as resp:
+            async with session.get(base + path, headers=headers, timeout=timeout) as resp:
                 entry["latency_ms"] = int((time.monotonic() - started) * 1000)
-                # 401/403 说明网络可达但凭据不可用，应在管理台显示红灯。
-                entry["ok"] = resp.status < 400
-                entry["detail"] = "HTTP " + str(resp.status)
+                entry["detail"] = "HTTP " + str(resp.status) + " " + path
+                if resp.status in (401, 403):
+                    # 凭据不可用：渠道确实不可用，红灯是真实结论。
+                    entry["ok"] = False
+                elif resp.status == 404:
+                    # 探测路径不存在：说明 health_path 配错，不能据此判定渠道故障。
+                    entry["ok"] = None
+                    entry["detail"] = "探测路径不存在（配 health_path）: " + path
+                else:
+                    entry["ok"] = resp.status < 400
         except Exception as exc:  # noqa: BLE001 - 体检必须吞掉一切异常并展示
             entry["latency_ms"] = int((time.monotonic() - started) * 1000)
             entry["detail"] = type(exc).__name__
         entry["checked_at"] = int(time.time())
-        state.provider_health[name] = {
-            "ok": entry["ok"],
-            "reason": "" if entry["ok"] else entry["detail"],
-            "checked_at": entry["checked_at"],
-        }
+        if entry["ok"] is None:
+            # 探测路径错误：只更新原因，不覆盖健康判定，避免误熔断整条链路。
+            state.provider_health[name] = {
+                "ok": state.provider_health.get(name, {}).get("ok"),
+                "reason": entry["detail"],
+                "checked_at": entry["checked_at"],
+            }
+        else:
+            state.provider_health[name] = {
+                "ok": entry["ok"],
+                "reason": "" if entry["ok"] else entry["detail"],
+                "checked_at": entry["checked_at"],
+            }
         results.append(entry)
     return web.json_response({"results": results})
 

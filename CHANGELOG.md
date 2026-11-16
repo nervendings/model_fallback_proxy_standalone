@@ -1,6 +1,24 @@
 # 变更记录
 
 
+## 0.6.7 - 2026-11-16
+
+### 变更
+
+- `deepseek-v4-1-flash-261017` 从「仅可选」改为**全链最后一站**：
+  原三个根节点（glm-5-3 / zai-org 两个别名）的 children 改为指向它，
+  该节点自身 children 置空，成为唯一 sink。
+- `model_policy.json` 的 fallback 与 high/low 两档 fallback 末位同步改为该模型；
+  auto-continue 的 model_chain 因此也以它为最后一站。
+- admin 健康探测修正：支持逐渠道 `health_path`、按 auth_mode 带鉴权、
+  404 与 401 分开报（ok=None 不写熔断态）。
+
+### 修复
+
+- 管理台 `/_fallback/admin/` 四个渠道全红：原代码写死 `base_url + /v1/models`
+  且不带鉴权。方舟官方是 `/api/v3/models`（拼成 `/api/v3/v1/models` 必 404），
+  其余渠道缺 key 一律 401。修正后四渠道全绿。
+
 ## 0.6.6 - 2026-11-16
 
 ### 新增

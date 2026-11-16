@@ -36,7 +36,9 @@
       "api_key_env": "",
       "enabled": true,
       "provider_failure_threshold": 2,
-      "provider_cooldown_s": 120
+      "provider_cooldown_s": 120,
+      "health_path": "/v1/models",
+      "health_api_key_env": "OPENAI_API_KEY"
     },
     "ark": {
       "name": "火山方舟 Coding Plan（自购，稳定按量）",
@@ -45,7 +47,8 @@
       "api_key_env": "ARK_API_KEY",
       "enabled": true,
       "provider_failure_threshold": 3,
-      "provider_cooldown_s": 300
+      "provider_cooldown_s": 300,
+      "health_path": "/models"
     },
     "qingyanx": {
       "name": "青岩中转（自购，限流 8 req/min）",
@@ -54,7 +57,8 @@
       "api_key_env": "QINGYANX_API_KEY",
       "enabled": true,
       "provider_failure_threshold": 2,
-      "provider_cooldown_s": 300
+      "provider_cooldown_s": 300,
+      "health_path": "/models"
     },
     "ark-official": {
       "name": "火山方舟官方 /api/v3（AI Review 专用 key，按量计费）",
@@ -63,7 +67,8 @@
       "api_key_env": "ARK_AI_API_KEY",
       "enabled": true,
       "provider_failure_threshold": 3,
-      "provider_cooldown_s": 300
+      "provider_cooldown_s": 300,
+      "health_path": "/models"
     }
   },
   "router": {
@@ -114,7 +119,9 @@
         "retries": 0,
         "cooldown_s": 600
       },
-      "children": []
+      "children": [
+        "deepseek-v4-1-flash-261017"
+      ]
     },
     "zai-org/glm-5.3-flash": {
       "provider": "qingyanx",
@@ -124,7 +131,9 @@
         "retries": 0,
         "cooldown_s": 300
       },
-      "children": []
+      "children": [
+        "deepseek-v4-1-flash-261017"
+      ]
     },
     "zai-org/glm-5.3": {
       "provider": "qingyanx",
@@ -134,18 +143,19 @@
         "retries": 0,
         "cooldown_s": 600
       },
-      "children": []
+      "children": [
+        "deepseek-v4-1-flash-261017"
+      ]
     },
     "deepseek-v4-1-flash-261017": {
       "provider": "ark-official",
-      "comment": "火山方舟 DeepSeek V4.1 Flash（1M 上下文，按量计费）。首选本通道，失败后回落到 sub2api 的 deepseek-flash 链路。",
+      "comment": "全链最后一站（根）：方舟官方 /api/v3 按量计费，专用 key。前置链路全部不可用时才走到这里；自身无下级。",
       "policy": {
         "retries": 1,
-        "cooldown_s": 180
+        "cooldown_s": 300,
+        "first_byte_timeout_s": 90
       },
-      "children": [
-        "deepseek-flash"
-      ]
+      "children": []
     }
   },
   "special_rules": [
