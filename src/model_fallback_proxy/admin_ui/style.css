@@ -490,3 +490,116 @@ svg.dag-edges .edge-dot { fill: var(--accent); }
   .params-body { grid-template-columns: 1fr; }
   .node-head { flex-wrap: wrap; }
 }
+
+/* ---------- 自绘模型下拉（原生 select 下拉在深色下白底浅字，读不清） ---------- */
+select option, select optgroup {
+  background: var(--panel);
+  color: var(--text);
+}
+
+.picker { position: relative; min-width: 0; }
+.picker-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  justify-content: space-between;
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  padding: 4px 8px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+.picker-btn:hover { border-color: var(--accent); }
+.picker.open .picker-btn { border-color: var(--accent); outline: 2px solid var(--accent-weak); }
+.picker-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.picker-label.placeholder { color: var(--muted); }
+.picker-caret { color: var(--muted); font-size: 11px; flex: 0 0 auto; }
+.picker-pop {
+  position: absolute;
+  z-index: 60;
+  top: calc(100% + 4px);
+  left: 0;
+  width: max(100%, 280px);
+  max-height: 330px;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, .4);
+  overflow: hidden;
+}
+.picker-pop.hidden { display: none; }
+.picker-search {
+  margin: 8px;
+  padding: 5px 8px;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.picker-search::placeholder { color: var(--muted); opacity: .85; }
+.picker-search:focus { outline: none; border-color: var(--accent); }
+.picker-list { overflow: auto; padding: 0 6px 8px; }
+.picker-group {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 6px 4px 3px;
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--panel);
+  letter-spacing: .3px;
+}
+.picker-item {
+  display: block;
+  width: 100%;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.picker-item:hover { background: var(--accent-weak); color: var(--accent); }
+.picker-item.selected { background: var(--accent-weak); color: var(--accent); font-weight: 600; }
+.picker-empty { padding: 10px 8px; font-size: 12px; color: var(--muted); }
+
+.node-card.picker-open { position: relative; z-index: 30; }
+.picker.node-name { flex: 1 1 150px; }
+.picker.node-name .picker-btn {
+  padding: 2px 6px;
+  font-size: 14px;
+  font-weight: 600;
+  border-color: transparent;
+  background: transparent;
+}
+.picker.node-name .picker-btn:hover { border-color: var(--line); }
+.picker.edge-add { width: auto; flex: 0 0 auto; }
+.picker.edge-add .picker-btn {
+  width: auto;
+  padding: 0 6px;
+  font-size: 13px;
+  line-height: 1.6;
+  border-style: dashed;
+  color: var(--muted);
+  background: transparent;
+}
+.picker.edge-add .picker-caret { display: none; }
+.picker.edge-add .picker-pop { width: 280px; }
+.picker.remote-picker { width: 100%; }
+.picker.remote-picker .picker-btn { font-size: 12px; padding: 3px 6px; }
+.dialog-picker-wrap { min-width: 0; }
+.picker.dialog-picker { width: 100%; }

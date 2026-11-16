@@ -84,6 +84,167 @@
     return node;
   }
 
+  /* ---------- 自绘模型下拉：原生 select 在深色主题下白底浅字，无法阅读 ---------- */
+  var pickerCloser = null;
+
+  function closeOpenPicker() {
+    if (pickerCloser) {
+      var fn = pickerCloser;
+      pickerCloser = null;
+      fn();
+    }
+  }
+
+  // 按供应商分组模型名；同名模型只出现一次，归到第一个有它的渠道
+  function modelPickerGroups() {
+    var groups = [];
+    var seen = {};
+    var providers = (state.config && state.config.providers) || {};
+    Object.keys(providers).forEach(function (provider) {
+      var models = catalogModels(provider);
+      if (!models.length) { return; }
+      var items = [];
+      models.forEach(function (name) {
+        if (seen[name]) { return; }
+        seen[name] = true;
+        items.push({ value: name, label: name, group: provider });
+      });
+      if (items.length) { groups.push({ name: provider, items: items }); }
+    });
+    var codexItems = [];
+    catalogModels('__codex__').forEach(function (name) {
+      if (seen[name]) { return; }
+      seen[name] = true;
+      codexItems.push({ value: name, label: name, group: 'Codex 本地清单' });
+    });
+    if (codexItems.length) { groups.push({ name: 'Codex 本地清单', items: codexItems }); }
+    var restItems = [];
+    allModels().forEach(function (name) {
+      if (seen[name]) { return; }
+      seen[name] = true;
+      restItems.push({ value: name, label: name, group: '当前链路' });
+    });
+    if (restItems.length) { groups.push({ name: '当前链路', items: restItems }); }
+    return groups;
+  }
+
+  function buildModelPicker(opts) {
+    var options = opts || {};
+    var wrap = el('div', 'picker' + (options.className ? ' ' + options.className : ''));
+    var button = el('button', 'picker-btn');
+    button.type = 'button';
+    if (options.title) { button.title = options.title; }
+    var label = el('span', 'picker-label', options.value || options.placeholder || '请选择');
+    if (!options.value) { label.classList.add('placeholder'); }
+    button.appendChild(label);
+    button.appendChild(el('span', 'picker-caret', '▾'));
+    wrap.appendChild(button);
+
+    var pop = el('div', 'picker-pop hidden');
+    var search = el('input', 'picker-search');
+    search.type = 'text';
+    search.placeholder = '输入关键词过滤…';
+    search.setAttribute('aria-label', '搜索模型名');
+    pop.appendChild(search);
+    var list = el('div', 'picker-list');
+    pop.appendChild(list);
+    wrap.appendChild(pop);
+
+    var groups = options.groups || [];
+    var current = options.value || '';
+
+    function labelOf(value) {
+      var found = '';
+      groups.forEach(function (group) {
+        group.items.forEach(function (item) {
+          if (item.value === value) { found = item.label; }
+        });
+      });
+      return found || value;
+    }
+
+    function renderList(keyword) {
+      list.textContent = '';
+      var kw = String(keyword || '').trim().toLowerCase();
+      var shown = 0;
+      groups.forEach(function (group) {
+        var matched = group.items.filter(function (item) {
+          if (!kw) { return true; }
+          return item.label.toLowerCase().indexOf(kw) >= 0 ||
+            group.name.toLowerCase().indexOf(kw) >= 0;
+        });
+        if (!matched.length) { return; }
+        list.appendChild(el('div', 'picker-group', group.name));
+        matched.forEach(function (item) {
+          var row = el('button', 'picker-item' + (item.value === current ? ' selected' : ''), item.label);
+          row.type = 'button';
+          row.title = item.label;
+          row.addEventListener('click', function () {
+            current = item.value;
+            label.textContent = item.label;
+            label.classList.remove('placeholder');
+            close();
+            if (options.onSelect) { options.onSelect(item.value); }
+          });
+          list.appendChild(row);
+          shown += 1;
+        });
+      });
+      if (!shown) { list.appendChild(el('div', 'picker-empty', '没有匹配的模型名')); }
+    }
+
+    function onDocPointer(ev) {
+      if (!wrap.contains(ev.target)) { close(); }
+    }
+    function onKeyDown(ev) {
+      if (ev.key === 'Escape') { ev.preventDefault(); close(); return; }
+      if (ev.key === 'Enter' && document.activeElement === search) {
+        ev.preventDefault();
+        var first = list.querySelector('.picker-item');
+        if (first) { first.click(); }
+      }
+    }
+    function open() {
+      closeOpenPicker();
+      renderList('');
+      pop.classList.remove('hidden');
+      wrap.classList.add('open');
+      var card = wrap.closest ? wrap.closest('.node-card') : null;
+      if (card) { card.classList.add('picker-open'); }
+      document.addEventListener('mousedown', onDocPointer, true);
+      document.addEventListener('keydown', onKeyDown);
+      pickerCloser = close;
+      setTimeout(function () { search.focus(); }, 0);
+    }
+    function close() {
+      pop.classList.add('hidden');
+      wrap.classList.remove('open');
+      var card = wrap.closest ? wrap.closest('.node-card') : null;
+      if (card) { card.classList.remove('picker-open'); }
+      document.removeEventListener('mousedown', onDocPointer, true);
+      document.removeEventListener('keydown', onKeyDown);
+      if (pickerCloser === close) { pickerCloser = null; }
+    }
+    button.addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      if (pop.classList.contains('hidden')) { open(); } else { close(); }
+    });
+    search.addEventListener('input', function () { renderList(search.value); });
+
+    wrap.setValue = function (value) {
+      current = value || '';
+      if (current) {
+        label.textContent = labelOf(current);
+        label.classList.remove('placeholder');
+      } else {
+        label.textContent = options.placeholder || '请选择';
+        label.classList.add('placeholder');
+      }
+    };
+    wrap.getValue = function () { return current; };
+    return wrap;
+  }
+
   function deepCopy(value) { return JSON.parse(JSON.stringify(value)); }
 
   function showToast(message, isError) {
@@ -722,24 +883,22 @@
     var title = el('div', 'node-title');
 
     // 节点名：从已记录的模型清单里选，不再手输
-    var nameSelect = el('select', 'node-name');
-    nameSelect.title = '从模型清单里选择；改名会同步更新所有指向它的降级链路';
-    allKnownModelNames().forEach(function (candidate) {
-      var option = el('option', '', candidate);
-      option.value = candidate;
-      if (candidate === modelName) { option.selected = true; }
-      nameSelect.appendChild(option);
-    });
-    nameSelect.addEventListener('change', function () {
-      var next = nameSelect.value;
-      if (!next || next === modelName) { return; }
-      if (!window.confirm('改名会同步更新所有降级链路，确定把「' + modelName + '」改为「' + next + '」？')) {
-        nameSelect.value = modelName;
-        return;
+    var namePicker = buildModelPicker({
+      value: modelName,
+      placeholder: '选择模型',
+      title: '从模型清单里选择；改名会同步更新所有指向它的降级链路',
+      className: 'node-name',
+      groups: modelPickerGroups(),
+      onSelect: function (next) {
+        if (!next || next === modelName) { return; }
+        if (!window.confirm('改名会同步更新所有降级链路，确定把「' + modelName + '」改为「' + next + '」？')) {
+          namePicker.setValue(modelName);
+          return;
+        }
+        renameModel(modelName, next);
       }
-      renameModel(modelName, next);
     });
-    title.appendChild(nameSelect);
+    title.appendChild(namePicker);
 
     var meta = el('div', 'node-meta');
     meta.appendChild(el('span', 'chip prov', node.provider || '未指定供应商'));
@@ -783,25 +942,26 @@
       chip.appendChild(remove);
       outBar.appendChild(chip);
     });
-    var select = el('select', 'edge-add');
-    var emptyOption = el('option', '', '＋');
-    emptyOption.value = '';
-    emptyOption.title = '添加降级目标';
-    select.appendChild(emptyOption);
+    var edgeItems = [];
     allModels().forEach(function (candidate) {
       if (candidate === modelName) { return; }
       if (kids.indexOf(candidate) >= 0) { return; }
       if (wouldCreateCycle(modelName, candidate)) { return; }
-      var option = el('option', '', candidate);
-      option.value = candidate;
-      select.appendChild(option);
+      edgeItems.push({ value: candidate, label: candidate, group: '全部模型' });
     });
-    select.addEventListener('change', function () {
-      if (!select.value) { return; }
-      node.children = kids.concat([select.value]);
-      markDirty(); renderDag();
+    var edgePicker = buildModelPicker({
+      value: '',
+      placeholder: '＋',
+      title: '添加降级目标',
+      className: 'edge-add',
+      groups: edgeItems.length ? [{ name: '全部模型', items: edgeItems }] : [],
+      onSelect: function (child) {
+        if (!child) { return; }
+        node.children = kids.concat([child]);
+        markDirty(); renderDag();
+      }
     });
-    outBar.appendChild(select);
+    outBar.appendChild(edgePicker);
     card.appendChild(outBar);
 
     // 被谁降级进来：没有入边就不占一行
@@ -823,24 +983,25 @@
     // 上游真实模型：从该供应商的模型清单里选
     var remoteWrap = el('div', 'param wide');
     remoteWrap.appendChild(el('label', '', '上游模型 remote_model'));
-    var remoteSelect = el('select');
-    var sameOption = el('option', '', '与节点名相同');
-    sameOption.value = '';
-    remoteSelect.appendChild(sameOption);
     var remoteOptions = catalogModels(node.provider).slice();
     if (node.remote_model && remoteOptions.indexOf(node.remote_model) < 0) { remoteOptions.push(node.remote_model); }
     remoteOptions.sort();
+    var remoteItems = [{ value: '', label: '与节点名相同', group: node.provider || '模型清单' }];
     remoteOptions.forEach(function (candidate) {
-      var option = el('option', '', candidate);
-      option.value = candidate;
-      if (candidate === node.remote_model) { option.selected = true; }
-      remoteSelect.appendChild(option);
+      remoteItems.push({ value: candidate, label: candidate, group: node.provider || '模型清单' });
     });
-    remoteSelect.addEventListener('change', function () {
-      if (remoteSelect.value) { node.remote_model = remoteSelect.value; } else { delete node.remote_model; }
-      markDirty(); renderDag();
+    var remotePicker = buildModelPicker({
+      value: node.remote_model || '',
+      placeholder: '与节点名相同',
+      title: '选择该供应商真实模型名；留空表示与节点名相同',
+      className: 'remote-picker',
+      groups: [{ name: node.provider || '模型清单', items: remoteItems }],
+      onSelect: function (value) {
+        if (value) { node.remote_model = value; } else { delete node.remote_model; }
+        markDirty(); renderDag();
+      }
     });
-    remoteWrap.appendChild(remoteSelect);
+    remoteWrap.appendChild(remotePicker);
     paramsBody.appendChild(remoteWrap);
 
     // 每节点策略参数：留空 = 继承 defaults
@@ -889,6 +1050,7 @@
   function renderDag() {
     var forest = $('forest');
     if (!forest) { return; }
+    closeOpenPicker();
     forest.textContent = '';
     var catalogHint = $('catalogHint');
     if (catalogHint) {
@@ -1220,9 +1382,11 @@
 
   function fillNodeModelOptions() {
     var provider = $('newNodeProvider').value;
-    var select = $('newNodeName');
+    var wrap = $('newNodeNameWrap');
+    var hidden = $('newNodeName');
     var hint = $('nodeDialogHint');
-    select.textContent = '';
+    wrap.textContent = '';
+    hidden.value = '';
     var names = catalogModels(provider).concat(catalogModels('__codex__'));
     var unique = [];
     names.forEach(function (name) { if (unique.indexOf(name) < 0) { unique.push(name); } });
@@ -1230,19 +1394,24 @@
     var existing = state.config.router || {};
     var available = unique.filter(function (name) { return !existing[name]; });
     if (!available.length) {
-      var option = el('option', '', '（暂无可用模型，先同步模型清单）');
-      option.value = '';
-      select.appendChild(option);
+      wrap.appendChild(el('div', 'picker-empty', '（暂无可用模型，先同步模型清单）'));
       hint.textContent = unique.length
         ? '该供应商的模型都已经在链路里了。'
         : '该供应商还没有模型清单；点「同步模型清单」自动抓取。';
       return;
     }
-    available.forEach(function (name) {
-      var option = el('option', '', name);
-      option.value = name;
-      select.appendChild(option);
+    var dialogItems = available.map(function (name) {
+      return { value: name, label: name, group: provider || '模型清单' };
     });
+    var picker = buildModelPicker({
+      value: available[0],
+      placeholder: '选择模型',
+      className: 'dialog-picker',
+      groups: [{ name: provider || '模型清单', items: dialogItems }],
+      onSelect: function (value) { hidden.value = value; }
+    });
+    hidden.value = available[0];
+    wrap.appendChild(picker);
     hint.textContent = '来源：' + (provider || '模型清单') + '，共 ' + available.length + ' 个可添加。';
     if (!catalogModels(provider).length) {
       hint.textContent += ' 供应商清单为空，当前展示 Codex 清单。';
