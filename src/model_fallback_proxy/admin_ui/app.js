@@ -1438,6 +1438,11 @@
     return !!(box && box.checked);
   }
 
+  function isPatternDialog() {
+    var box = $('newNodePattern');
+    return !!(box && box.checked && !isCatchAllDialog());
+  }
+
   function fillNodeModelOptions() {
     var provider = $('newNodeProvider').value;
     var wrap = $('newNodeNameWrap');
@@ -1445,6 +1450,13 @@
     var hint = $('nodeDialogHint');
     wrap.textContent = '';
     hidden.value = '';
+    var patternInput = $('newNodePatternText');
+    if (isPatternDialog()) {
+      if (patternInput) { patternInput.classList.remove('hidden'); patternInput.focus(); }
+      hint.textContent = '通配入口：* 匹配任意字符，? 匹配单个字符（如 gpt-*）。远端模型使用实际请求名，无需从清单选择。';
+      return;
+    }
+    if (patternInput) { patternInput.classList.add('hidden'); }
     var names = catalogModels(provider).concat(catalogModels('__codex__'));
     var unique = [];
     names.forEach(function (name) { if (unique.indexOf(name) < 0) { unique.push(name); } });
@@ -1506,8 +1518,26 @@
   function addModelFromDialog() {
     var name = $('newNodeName').value;
     var provider = $('newNodeProvider').value;
-    if (!name) { showToast('请选择模型（没有清单就先同步）', true); return false; }
     if (!provider) { showToast('请选择供应商', true); return false; }
+    if (isPatternDialog()) {
+      var pattern = ($('newNodePatternText').value || '').trim();
+      if (!pattern) { showToast('请输入通配表达式，如 gpt-*', true); return false; }
+      if (pattern === '*') { showToast('「*」请用上面的“全局兜底”选项创建', true); return false; }
+      if (pattern.indexOf('*') < 0 && pattern.indexOf('?') < 0) {
+        showToast('通配表达式至少要包含一个 * 或 ?', true); return false;
+      }
+      if (state.config.router[pattern]) { showToast('节点「' + pattern + '」已存在', true); return false; }
+      state.config.router[pattern] = {
+        provider: provider,
+        children: [],
+        comment: '通配入口：匹配到的模型名原样作为远端模型，失败后走链尾全局兜底'
+      };
+      markDirty();
+      renderDag();
+      showToast('已新增通配入口：' + pattern);
+      return true;
+    }
+    if (!name) { showToast('请选择模型（没有清单就先同步）', true); return false; }
     if (isCatchAllDialog()) {
       if (state.config.router['*']) { showToast('全局兜底「*」已存在，直接改它的供应商/远端模型即可', true); return false; }
       state.config.router['*'] = {
@@ -1969,9 +1999,21 @@
     var catchAllBox = $('newNodeCatchAll');
     if (catchAllBox) {
       catchAllBox.addEventListener('change', function () {
+        if (catchAllBox.checked) {
+          var patternBox = $('newNodePattern');
+          if (patternBox) { patternBox.checked = false; }
+        }
         $('nodeDialogHint').textContent = catchAllBox.checked
           ? '全局兜底模式：节点名固定为 *，选中的模型作为远端模型。'
           : '';
+        fillNodeModelOptions();
+      });
+    }
+    var patternBox = $('newNodePattern');
+    if (patternBox) {
+      patternBox.addEventListener('change', function () {
+        if (patternBox.checked && catchAllBox) { catchAllBox.checked = false; }
+        $('nodeDialogHint').textContent = '';
         fillNodeModelOptions();
       });
     }

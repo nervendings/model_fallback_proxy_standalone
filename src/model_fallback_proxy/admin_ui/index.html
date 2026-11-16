@@ -9,7 +9,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>模型降级路由管理台</title>
-<link rel="stylesheet" href="style.css?v=0.7.0">
+<link rel="stylesheet" href="style.css?v=0.7.1">
 </head>
 <body>
 <div class="app">
@@ -251,6 +251,11 @@
         <input type="checkbox" id="newNodeCatchAll">
         <span>设为全局兜底「*」：任何模型失败后都走它</span>
       </label>
+      <label class="check-inline">
+        <input type="checkbox" id="newNodePattern">
+        <span>按通配符匹配模型名（如 gpt-*、glm-5-?）</span>
+      </label>
+      <input type="text" id="newNodePatternText" class="pattern-input hidden" placeholder="gpt-*" autocomplete="off" spellcheck="false">
     </div>
     <p id="nodeDialogHint" class="muted small"></p>
     <div class="dialog-actions">
@@ -261,6 +266,6 @@
 </dialog>
 
 <div id="toast" class="toast hidden"></div>
-<script src="app.js?v=0.7.0"></script>
+<script src="app.js?v=0.7.1"></script>
 </body>
 </html>

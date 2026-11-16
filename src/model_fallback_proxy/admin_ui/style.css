@@ -655,3 +655,16 @@ select option, select optgroup {
   height: 15px;
   accent-color: var(--accent);
 }
+
+.pattern-input {
+  width: 100%;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.pattern-input.hidden { display: none; }
