@@ -55,6 +55,15 @@
       "enabled": true,
       "provider_failure_threshold": 2,
       "provider_cooldown_s": 300
+    },
+    "ark-official": {
+      "name": "火山方舟官方 /api/v3（AI Review 专用 key，按量计费）",
+      "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+      "auth_mode": "bearer",
+      "api_key_env": "ARK_AI_API_KEY",
+      "enabled": true,
+      "provider_failure_threshold": 3,
+      "provider_cooldown_s": 300
     }
   },
   "router": {
@@ -126,6 +135,17 @@
         "cooldown_s": 600
       },
       "children": []
+    },
+    "deepseek-v4-1-flash-261017": {
+      "provider": "ark-official",
+      "comment": "火山方舟 DeepSeek V4.1 Flash（1M 上下文，按量计费）。首选本通道，失败后回落到 sub2api 的 deepseek-flash 链路。",
+      "policy": {
+        "retries": 1,
+        "cooldown_s": 180
+      },
+      "children": [
+        "deepseek-flash"
+      ]
     }
   },
   "special_rules": [
