@@ -1,5 +1,33 @@
 # 变更记录
 
+## 0.7.2 - 2026-11-16
+
+### 修复
+
+- 修「未知模型没有落到 * 兜底」：sub2api 对清单外模型返回 404 +
+  `Model ... is not supported by any configured account in this group`（type=model_not_found），
+  旧正则只认 `model not found` / `invalid model`，文案不命中就被判成终态直接抛给客户端。
+  现在同时识别 `model_not_found`、`model does not exist`、`model not supported`、
+  `not supported by any configured`、`no available account/channel`。
+- 效果：任意模型名失败后都能继续沿链走，最终落到全局兜底 `*`（默认 ark 直连
+  deepseek-v4-1-flash-261017）。
+
+### 修复（上游路径拼接）
+
+- 兜底节点 `*` 指向 ark 官方（base_url 含 `/api/v3`）时，原来把入站 `/v1/chat/completions` 直接拼在 base 后面，
+  实际请求 `/api/v3/v1/chat/completions` 必然 404，兜底等于没生效。新增供应商可选字段 `path_strip_prefix`：
+  拼 URL 前先剥掉入站前缀，ark 两个供应商都配 `/v1`。
+- 同时收敛相邻重复的 `/v1`：base_url 已带 `/v1` 的渠道（如青岩中转）不再拼出 `/v1/v1/responses`。
+- 拼接逻辑抽成 `buildUpstreamUrl`，健康探测路径不受影响。
+
+### 测试
+
+- 新增 `TestKeywordClassification`：覆盖上述 5 类真实文案，其中 sub2api 那条是线上实测抓到的原文。
+- 新增 `TestUpstreamUrl`：ark 剥前缀、base 自带 /v1 去重、passthrough 原样、健康路径不受影响。
+- 端到端实测：`totally-unknown-model-xyz` 走 `/v1/chat/completions` 与 `/v1/responses` 均 200，
+  响应 `model=deepseek-v4-1-flash-261017`，证明 `*` 兜底真实生效。
+
+
 ## 0.7.1 - 2026-11-16
 
 ### 新增

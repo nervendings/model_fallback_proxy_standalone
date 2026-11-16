@@ -51,7 +51,15 @@ KEYWORD_CHECKS = {
     "capacity": lambda text: isCapacityText(text) or getRetryableModelFailureKind(text) != "",
     "corrupted_history": isCorruptedHistoryError,
     "model_not_found": lambda text: bool(
-        re.search(r"model[_ ]?(not|does not) ?(exist|found)|invalid model", text)
+        re.search(
+            # 覆盖各家真实文案：model not found / model_not_found / model does not exist /
+            # "is not supported by any configured account"（sub2api 实际返回）/ no available account
+            r"model[_ ]?(not|does not)[ _]?(exist|found|supported)"
+            r"|invalid model"
+            r"|not supported by any configured"
+            r"|no available (account|channel)",
+            text,
+        )
     ),
     "auth_error": lambda text: bool(
         re.search(r"invalid api key|authentication|unauthorized|permission", text)
@@ -634,6 +642,25 @@ def buildAuthHeaders(baseHeaders: dict[str, str], provider: dict[str, Any]) -> d
     return headers
 
 
+def buildUpstreamUrl(provider: dict[str, Any], rawPath: str, rawQuery: str = "") -> str:
+    """拼接上游 URL，兼容 base_url 自带路径前缀与 /v1 重复的渠道。
+
+    - provider.path_strip_prefix：去掉入站路径前缀，如 ark 的 /api/v3 只认
+      /chat/completions、/responses，而客户端发的是 /v1/chat/completions。
+    - base_url 已带 /v1 时，自动收敛相邻重复的 /v1，避免 /v1/v1/responses 404。
+    """
+    base = str(provider.get("base_url", "")).rstrip("/")
+    path = rawPath or "/"
+    strip = str(provider.get("path_strip_prefix") or "").rstrip("/")
+    if strip and (path == strip or path.startswith(strip + "/")):
+        path = path[len(strip):] or "/"
+    target = base + path
+    target = re.sub(r"(?<=/v1)/v1(?=/)", "", target)
+    if rawQuery:
+        target += "?" + rawQuery
+    return target
+
+
 async def attemptUpstream(
     session: aiohttp.ClientSession,
     request: web.Request,
@@ -642,10 +669,9 @@ async def attemptUpstream(
     body: bytes,
     policy: NodePolicy,
 ) -> aiohttp.ClientResponse:
-    base = str(provider.get("base_url", "")).rstrip("/")
-    target = base + request.rel_url.raw_path
-    if request.rel_url.raw_query_string:
-        target += "?" + request.rel_url.raw_query_string
+    target = buildUpstreamUrl(
+        provider, request.rel_url.raw_path, request.rel_url.raw_query_string
+    )
     timeout = aiohttp.ClientTimeout(
         total=None,
         connect=policy.connect_timeout_s,

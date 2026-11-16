@@ -389,5 +389,69 @@ class TestSpecialRules(UpstreamHarness):
         self.assertIn('app.js?v=', out)
 
 
+
+class TestKeywordClassification(unittest.TestCase):
+    """真实上游文案回归：模型不存在类错误必须归类为 model_not_found 才能落到 * 兜底。"""
+
+    def setUp(self):
+        self.config = engine.RouterConfig(makeConfig())
+
+    def hit(self, raw):
+        return self.config.isRetryableText(engine.normalizeErrorText(raw))
+
+    def testSub2apiUnknownModelTextIsModelNotFound(self):
+        # sub2api 实测返回：404 + 这段文案，早先不命中关键词导致没走 * 兜底
+        raw = (
+            b'{"message": "Model \\"totally-unknown-model-xyz\\" is not supported by any '
+            b'configured account in this group", "type": "model_not_found"}'
+        )
+        self.assertEqual(self.hit(raw), "model_not_found")
+
+    def testCommonModelNotFoundWordings(self):
+        for raw in (
+            b'{"error": {"message": "model_not_found"}}',
+            b'{"error": {"message": "The model does not exist"}}',
+            b'{"error": {"message": "invalid model name"}}',
+            b'{"error": {"message": "no available account for this model"}}',
+        ):
+            with self.subTest(raw=raw):
+                self.assertEqual(self.hit(raw), "model_not_found")
+
+class TestUpstreamUrl(unittest.TestCase):
+    """上游 URL 拼接：ark 的 /api/v3 要剥掉入站 /v1，base 自带 /v1 时不能重复。"""
+
+    def testArkOfficialStripsInboundV1(self):
+        provider = {"base_url": "https://ark.cn-beijing.volces.com/api/v3", "path_strip_prefix": "/v1"}
+        self.assertEqual(
+            engine.buildUpstreamUrl(provider, "/v1/chat/completions"),
+            "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+        )
+        self.assertEqual(
+            engine.buildUpstreamUrl(provider, "/v1/responses", "a=1"),
+            "https://ark.cn-beijing.volces.com/api/v3/responses?a=1",
+        )
+
+    def testBaseUrlWithV1NotDuplicated(self):
+        provider = {"base_url": "https://api.qingyanx.com/v1"}
+        self.assertEqual(
+            engine.buildUpstreamUrl(provider, "/v1/responses"),
+            "https://api.qingyanx.com/v1/responses",
+        )
+
+    def testPassthroughKeepsPath(self):
+        provider = {"base_url": "https://sub2api.minieye.tech"}
+        self.assertEqual(
+            engine.buildUpstreamUrl(provider, "/v1/responses"),
+            "https://sub2api.minieye.tech/v1/responses",
+        )
+
+    def testHealthPathUnaffected(self):
+        provider = {"base_url": "https://ark.cn-beijing.volces.com/api/v3", "path_strip_prefix": "/v1"}
+        self.assertEqual(
+            engine.buildUpstreamUrl(provider, "/models"),
+            "https://ark.cn-beijing.volces.com/api/v3/models",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

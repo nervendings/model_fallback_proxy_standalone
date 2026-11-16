@@ -43,6 +43,7 @@
     "ark": {
       "name": "火山方舟 Coding Plan（自购，稳定按量）",
       "base_url": "https://ark.cn-beijing.volces.com/api/coding/v3",
+      "path_strip_prefix": "/v1",
       "auth_mode": "bearer",
       "api_key_env": "ARK_API_KEY",
       "enabled": true,
@@ -63,6 +64,7 @@
     "ark-official": {
       "name": "火山方舟官方 /api/v3（AI Review 专用 key，按量计费）",
       "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+      "path_strip_prefix": "/v1",
       "auth_mode": "bearer",
       "api_key_env": "ARK_AI_API_KEY",
       "enabled": true,
