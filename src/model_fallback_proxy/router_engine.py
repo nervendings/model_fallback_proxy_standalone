@@ -853,6 +853,151 @@ def defaultHealthPath(base: str) -> str:
     return "/models" if base.rstrip("/").endswith("/v1") else "/v1/models"
 
 
+def defaultModelsPath(base: str) -> str:
+    """按 base_url 推断模型清单路径（各家 /models 位置不同）。"""
+    trimmed = base.rstrip("/")
+    if trimmed.endswith("/v1") or trimmed.endswith("/v3") or trimmed.endswith("/coding/v3"):
+        return "/models"
+    return "/v1/models"
+
+
+def extractModelIds(payload: Any) -> list[str]:
+    """从 /models 响应里提取模型 ID，兼容 OpenAI、方舟和常见兼容层。"""
+    items: Any = None
+    if isinstance(payload, dict):
+        for key in ("data", "models", "items"):
+            if key in payload:
+                items = payload[key]
+                break
+        if isinstance(items, dict):
+            items = items.get("models") or items.get("data") or items.get("items")
+    elif isinstance(payload, list):
+        items = payload
+    found: list[str] = []
+    if not isinstance(items, list):
+        return found
+    for item in items:
+        if isinstance(item, str):
+            value = item
+        elif isinstance(item, dict):
+            value = str(item.get("id") or item.get("model") or item.get("name") or "")
+        else:
+            value = ""
+        value = value.strip()
+        if value and value not in found:
+            found.append(value)
+    found.sort()
+    return found
+
+
+def readCodexModelSlugs() -> list[str]:
+    """读取本机 Codex 模型清单（默认 ~/.codex/models.json）里的 slug。"""
+    override = os.environ.get("CODEX_MODELS_JSON", "").strip()
+    path = Path(override) if override else Path.home() / ".codex" / "models.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    raw = payload.get("models") if isinstance(payload, dict) else payload
+    if not isinstance(raw, list):
+        return []
+    slugs: list[str] = []
+    for item in raw:
+        if isinstance(item, str):
+            slug = item
+        elif isinstance(item, dict):
+            slug = str(item.get("slug") or item.get("id") or "")
+        else:
+            slug = ""
+        slug = slug.strip()
+        if slug and slug not in slugs:
+            slugs.append(slug)
+    return slugs
+
+
+async def handleAdminModelList(request: web.Request) -> web.Response:
+    """抓取模型清单并记录到配置 model_catalog。
+
+    body: {"provider": "sub2api"} 抓取某个供应商的 /models；
+          {"source": "codex"} 读取本机 Codex 模型清单。
+    只保存模型名，不保存任何密钥。
+    """
+    state: RouterState = request.app[ROUTER_STATE_KEY]
+    session: aiohttp.ClientSession = request.app[CLIENT_SESSION_KEY]
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 - 空 body / 非 JSON 一律当默认
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    updated_at = int(time.time())
+
+    if str(body.get("source") or "") == "codex":
+        models = readCodexModelSlugs()
+        if not models:
+            return web.json_response(
+                {"ok": False, "error": "未找到 Codex 模型清单 ~/.codex/models.json"}, status=404
+            )
+        catalog = dict(state.config.raw.get("model_catalog") or {})
+        catalog["__codex__"] = {"models": models, "updated_at": updated_at, "source": "codex"}
+        state.config.raw["model_catalog"] = catalog
+        error = state.saveConfig(state.config.raw)
+        if error:
+            return web.json_response({"ok": False, "error": error}, status=400)
+        return web.json_response(
+            {"ok": True, "source": "codex", "models": models,
+             "count": len(models), "updated_at": updated_at}
+        )
+
+    provider_name = str(body.get("provider") or "").strip()
+    provider = state.config.providers.get(provider_name)
+    if not isinstance(provider, dict):
+        return web.json_response(
+            {"ok": False, "error": "未知供应商：" + (provider_name or "(空)")}, status=400
+        )
+    base = str(provider.get("base_url") or "").rstrip("/")
+    path = str(provider.get("models_path") or provider.get("health_path") or defaultModelsPath(base))
+    headers = buildHealthHeaders(provider, request.headers.get("Authorization", ""))
+    timeout = aiohttp.ClientTimeout(total=20, connect=5, sock_connect=5, sock_read=15)
+    try:
+        async with session.get(base + path, headers=headers, timeout=timeout) as resp:
+            text_value = await resp.text()
+            if resp.status >= 400:
+                return web.json_response(
+                    {"ok": False, "error": "HTTP " + str(resp.status) + " " + path}, status=502
+                )
+            try:
+                payload = json.loads(text_value)
+            except ValueError:
+                return web.json_response(
+                    {"ok": False, "error": "模型清单不是合法 JSON"}, status=502
+                )
+    except Exception as exc:  # noqa: BLE001 - 抓取失败要回显原因
+        return web.json_response(
+            {"ok": False, "error": type(exc).__name__ + ": " + str(exc)[:200]}, status=502
+        )
+
+    models = extractModelIds(payload)
+    if not models:
+        return web.json_response(
+            {"ok": False, "error": "模型清单为空（检查 models_path 与鉴权）"}, status=502
+        )
+    catalog = dict(state.config.raw.get("model_catalog") or {})
+    catalog[provider_name] = {
+        "models": models,
+        "updated_at": updated_at,
+        "source": base + path,
+    }
+    state.config.raw["model_catalog"] = catalog
+    error = state.saveConfig(state.config.raw)
+    if error:
+        return web.json_response({"ok": False, "error": error}, status=400)
+    return web.json_response(
+        {"ok": True, "provider": provider_name, "models": models,
+         "count": len(models), "updated_at": updated_at}
+    )
+
+
 def buildHealthHeaders(provider: dict[str, Any], inbound_auth: str = "") -> dict[str, str]:
     """体检鉴权：bearer 读 api_key_env，passthrough 透传客户端 Authorization。
 
@@ -1020,6 +1165,7 @@ def createRoutedApp(state: RouterState | None = None) -> web.Application:
     app.router.add_put("/_fallback/admin/config", handleAdminConfigPut)
     app.router.add_post("/_fallback/admin/health_check", handleAdminHealthCheck)
     app.router.add_post("/_fallback/admin/reset_cooldowns", handleAdminResetCooldowns)
+    app.router.add_post("/_fallback/admin/models", handleAdminModelList)
     app.router.add_get("/_fallback/admin/", handleAdminIndex)
     app.router.add_get("/_fallback/admin/{name}", handleAdminAsset)
     app.router.add_route("*", "/{tail:.*}", handleRoutedRequest)

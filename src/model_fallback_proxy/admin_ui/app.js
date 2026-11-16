@@ -17,6 +17,7 @@
   var API = {
     config: '/_fallback/admin/config',
     health: '/_fallback/admin/health_check',
+    models: '/_fallback/admin/models',
     status: '/_fallback/status'
   };
 
@@ -149,6 +150,118 @@
   function routerOf(config) { return (config || state.config).router || {}; }
 
   function allModels() { return Object.keys(routerOf()).sort(); }
+
+  function catalogModels(provider) {
+    var catalog = (state.config && state.config.model_catalog) || {};
+    if (provider === '__codex__') {
+      var codex = catalog.__codex__;
+      return (codex && Array.isArray(codex.models)) ? codex.models.slice() : [];
+    }
+    if (provider) {
+      var item = catalog[provider];
+      return (item && Array.isArray(item.models)) ? item.models.slice() : [];
+    }
+    var merged = [];
+    Object.keys(catalog).forEach(function (key) {
+      if (key === '__codex__') { return; }
+      (catalog[key].models || []).forEach(function (name) {
+        if (merged.indexOf(name) < 0) { merged.push(name); }
+      });
+    });
+    return merged;
+  }
+
+  function allKnownModelNames() {
+    var names = allModels().slice();
+    catalogModels('').forEach(function (name) { if (names.indexOf(name) < 0) { names.push(name); } });
+    catalogModels('__codex__').forEach(function (name) { if (names.indexOf(name) < 0) { names.push(name); } });
+    names.sort();
+    return names;
+  }
+
+  function paramSummary(node) {
+    var count = 0;
+    PARAM_META.forEach(function (meta) {
+      var value = node[meta.key];
+      if (value === undefined || value === null || value === '') {
+        value = node.policy ? node.policy[meta.key] : undefined;
+      }
+      if (value !== undefined && value !== null && value !== '') { count += 1; }
+    });
+    return count ? ('参数 · 自定义 ' + count + ' 项') : '参数 · 全部继承默认';
+  }
+
+  function applyCatalog(key, models, updatedAt) {
+    if (!state.config.model_catalog) { state.config.model_catalog = {}; }
+    state.config.model_catalog[key] = {
+      models: (models || []).slice(),
+      updated_at: updatedAt || Math.floor(Date.now() / 1000)
+    };
+    if (state.saved) {
+      if (!state.saved.model_catalog) { state.saved.model_catalog = {}; }
+      state.saved.model_catalog[key] = deepCopy(state.config.model_catalog[key]);
+    }
+    renderDag();
+    if (currentRoute() === 'providers') { renderProviders(); }
+  }
+
+  function syncProviderModels(name) {
+    return requestJson(API.models, {
+      method: 'POST',
+      body: JSON.stringify({ provider: name }),
+      timeoutMs: 30000
+    }).then(function (payload) {
+      applyCatalog(name, payload.models, payload.updated_at);
+      showToast(name + '：已记录 ' + payload.count + ' 个模型');
+      return payload;
+    }).catch(function (err) {
+      showToast(name + ' 抓取失败：' + err.message, true);
+      return { ok: false, provider: name, error: err.message };
+    });
+  }
+
+  function syncCodexModels(quiet) {
+    return requestJson(API.models, {
+      method: 'POST',
+      body: JSON.stringify({ source: 'codex' }),
+      timeoutMs: 15000
+    }).then(function (payload) {
+      applyCatalog('__codex__', payload.models, payload.updated_at);
+      if (!quiet) { showToast('Codex 清单：已记录 ' + payload.count + ' 个模型'); }
+      return payload;
+    }).catch(function (err) {
+      if (!quiet) { showToast('Codex 清单读取失败：' + err.message, true); }
+      return { ok: false, provider: 'codex', error: err.message };
+    });
+  }
+
+  function syncModelCatalog() {
+    var button = $('btnSyncModels');
+    var providers = Object.keys(state.config.providers || {}).sort();
+    if (button) { button.disabled = true; button.textContent = '同步中…'; }
+    var tasks = providers.map(function (name) {
+      return requestJson(API.models, {
+        method: 'POST',
+        body: JSON.stringify({ provider: name }),
+        timeoutMs: 30000
+      }).then(function (payload) {
+        applyCatalog(name, payload.models, payload.updated_at);
+        return payload;
+      }).catch(function (err) {
+        return { ok: false, provider: name, error: err.message };
+      });
+    });
+    tasks.push(syncCodexModels(true));
+    return Promise.all(tasks).then(function (results) {
+      var okCount = results.filter(function (item) { return item && item.ok; }).length;
+      var failed = results.filter(function (item) { return item && !item.ok; })
+        .map(function (item) { return (item.provider || 'codex') + ': ' + item.error; });
+      showBanner('模型清单同步：' + okCount + '/' + results.length + ' 个来源成功。'
+        + (failed.length ? ' 失败：' + failed.join('；') : ''), failed.length ? '' : 'info');
+      if (button) { button.disabled = false; button.textContent = '同步模型清单'; }
+      return results;
+    });
+  }
 
   // 反向邻接：model -> 哪些节点的 children 指向它
   function parentMap(config) {
@@ -449,6 +562,7 @@
 
       var head = el('div', 'prow');
       head.appendChild(el('span', 'pname', name));
+      if (provider.name) { head.appendChild(el('span', 'muted small', provider.name)); }
 
       var enabledLabel = el('label', 'check');
       var enabled = el('input');
@@ -494,20 +608,55 @@
         provider.provider_failure_threshold = Number(value);
       }));
 
+      // 模型清单：抓取后存到 model_catalog，供新增节点下拉选择
+      var catalog = ((state.config.model_catalog || {})[name]) || null;
+      var count = (catalog && Array.isArray(catalog.models)) ? catalog.models.length : 0;
+      var catalogRow = el('div', 'pmeta-row');
+      catalogRow.appendChild(el('span', '', '模型清单'));
+      var catalogWrap = el('div', 'catalog-line');
+      catalogWrap.appendChild(el('span', 'muted small', count ? (count + ' 个 · ' + fmtTime(catalog.updated_at)) : '未同步'));
+      var syncBtn = el('button', 'btn small', count ? '刷新' : '抓取');
+      syncBtn.type = 'button';
+      syncBtn.addEventListener('click', function () {
+        syncBtn.disabled = true;
+        syncBtn.textContent = '抓取中…';
+        syncProviderModels(name).then(function () {
+          syncBtn.disabled = false;
+          syncBtn.textContent = '刷新';
+        });
+      });
+      catalogWrap.appendChild(syncBtn);
+      if (count) {
+        var details = document.createElement('details');
+        details.className = 'catalog-details';
+        var summary = document.createElement('summary');
+        summary.textContent = '查看模型名';
+        details.appendChild(summary);
+        var chips = el('div', 'pill-row catalog-chips');
+        catalog.models.forEach(function (model) { chips.appendChild(el('span', 'chip', model)); });
+        details.appendChild(chips);
+        catalogWrap.appendChild(details);
+      }
+      catalogRow.appendChild(catalogWrap);
+      card.appendChild(catalogRow);
+
       box.appendChild(card);
     });
 
     if (!Object.keys(providers).length) { box.appendChild(el('span', 'muted small', '还没有供应商。')); }
 
-    var selectBox = $('newNodeProvider');
-    var previous = selectBox.value;
-    selectBox.textContent = '';
-    Object.keys(providers).sort().forEach(function (name) {
-      var option = el('option', '', name + (providers[name].enabled === false ? '（已停用）' : ''));
-      option.value = name;
-      selectBox.appendChild(option);
-    });
-    if (previous && providers[previous]) { selectBox.value = previous; }
+    // Codex 本机模型清单（只读展示，供下拉框使用）
+    var codexInfo = $('codexCatalogInfo');
+    var codexBox = $('codexCatalogBox');
+    if (codexInfo && codexBox) {
+      var codex = ((state.config.model_catalog || {}).__codex__) || null;
+      var codexModels = (codex && Array.isArray(codex.models)) ? codex.models : [];
+      codexInfo.textContent = codexModels.length
+        ? ('已记录 ' + codexModels.length + ' 个 · ' + fmtTime(codex.updated_at))
+        : '未同步（点右侧按钮读取本机 Codex 清单）';
+      codexBox.textContent = '';
+      codexModels.forEach(function (model) { codexBox.appendChild(el('span', 'chip', model)); });
+    }
   }
 
   function fieldRow(providerName, key, label, value, placeholder, type, consume) {
@@ -570,96 +719,58 @@
     card.setAttribute('data-model', modelName);
 
     var head = el('div', 'node-head');
-    var nameBox = el('div', 'node-name');
-    var nameInput = el('input');
-    nameInput.type = 'text';
-    nameInput.value = modelName;
-    nameInput.setAttribute('aria-label', '模型名');
-    nameInput.title = '改名会同步更新所有指向它的降级链路';
-    nameInput.addEventListener('change', function () {
-      var next = nameInput.value.trim();
-      if (!next || next === modelName) { nameInput.value = modelName; return; }
+    var title = el('div', 'node-title');
+
+    // 节点名：从已记录的模型清单里选，不再手输
+    var nameSelect = el('select', 'node-name');
+    nameSelect.title = '从模型清单里选择；改名会同步更新所有指向它的降级链路';
+    allKnownModelNames().forEach(function (candidate) {
+      var option = el('option', '', candidate);
+      option.value = candidate;
+      if (candidate === modelName) { option.selected = true; }
+      nameSelect.appendChild(option);
+    });
+    nameSelect.addEventListener('change', function () {
+      var next = nameSelect.value;
+      if (!next || next === modelName) { return; }
+      if (!window.confirm('改名会同步更新所有降级链路，确定把「' + modelName + '」改为「' + next + '」？')) {
+        nameSelect.value = modelName;
+        return;
+      }
       renameModel(modelName, next);
     });
-    nameBox.appendChild(nameInput);
-    head.appendChild(nameBox);
+    title.appendChild(nameSelect);
 
-    var badgeRow = el('div', 'node-meta');
-    badgeRow.appendChild(el('span', 'chip prov', node.provider || '未指定供应商'));
-    badgeRow.appendChild(el('span', 'chip', '第 ' + (depth + 1) + ' 层'));
-    if (!kids.length) { badgeRow.appendChild(el('span', 'chip depth', '根 · 最后兜底')); }
-    if (parents.length > 1) { badgeRow.appendChild(el('span', 'chip hubchip', '汇聚点 · ' + parents.length + ' 条入边')); }
-    if (node.remote_model) { badgeRow.appendChild(el('span', 'chip', '上游 ' + node.remote_model)); }
-    nameBox.appendChild(badgeRow);
+    var meta = el('div', 'node-meta');
+    meta.appendChild(el('span', 'chip prov', node.provider || '未指定供应商'));
+    meta.appendChild(el('span', 'chip', '第 ' + (depth + 1) + ' 层'));
+    if (!kids.length) { meta.appendChild(el('span', 'chip depth', '根 · 最后兜底')); }
+    if (parents.length > 1) { meta.appendChild(el('span', 'chip hubchip', '汇聚 · ' + parents.length + ' 入边')); }
+    title.appendChild(meta);
+    head.appendChild(title);
 
     var actions = el('div', 'node-actions');
-    var entryBtn = el('button', 'btn icon' + (node.entry ? ' on' : ''), node.entry ? '首选 ✓' : '设为首选');
+    var entryBtn = el('button', 'btn icon' + (node.entry ? ' on' : ''), node.entry ? '★' : '☆');
     entryBtn.type = 'button';
-    entryBtn.title = '标记为可被客户端直接请求的入口模型';
+    entryBtn.title = node.entry ? '当前是入口模型（点击取消）' : '设为首选入口模型';
     entryBtn.addEventListener('click', function () {
       if (node.entry) { delete node.entry; } else { node.entry = true; }
       markDirty(); renderDag();
     });
     actions.appendChild(entryBtn);
 
-    var delBtn = el('button', 'btn icon danger', '删除');
+    var delBtn = el('button', 'btn icon danger', '×');
     delBtn.type = 'button';
+    delBtn.title = '删除节点 ' + modelName;
     delBtn.addEventListener('click', function () { removeModel(modelName); });
     actions.appendChild(delBtn);
     head.appendChild(actions);
     card.appendChild(head);
 
-    // 上游真实模型 ID：留空表示与节点名同名
-    var remote = el('div', 'node-remote');
-    remote.appendChild(el('span', 'muted', 'remote_model'));
-    var remoteInput = el('input');
-    remoteInput.type = 'text';
-    remoteInput.value = node.remote_model || '';
-    remoteInput.placeholder = '留空＝与模型名同名';
-    remoteInput.setAttribute('aria-label', modelName + ' remote_model');
-    remoteInput.addEventListener('change', function () {
-      var value = remoteInput.value.trim();
-      if (value) { node.remote_model = value; } else { delete node.remote_model; }
-      markDirty(); renderDag();
-    });
-    remote.appendChild(remoteInput);
-    card.appendChild(remote);
-
-    // 每节点策略参数：留空 = 继承 defaults
-    var params = el('div', 'node-params');
-    PARAM_META.forEach(function (meta) {
-      var wrapper = el('div', 'param');
-      wrapper.appendChild(el('label', '', meta.label));
-      var input = el('input');
-      input.type = 'number';
-      input.step = meta.step;
-      input.min = meta.min;
-      input.value = (node[meta.key] === undefined || node[meta.key] === null) ? '' : node[meta.key];
-      input.placeholder = '继承 ' + fmtNum(state.config.defaults[meta.key]);
-      input.title = meta.hint;
-      input.setAttribute('aria-label', modelName + ' ' + meta.label);
-      input.addEventListener('change', function () {
-        var raw = input.value.trim();
-        if (raw === '') { delete node[meta.key]; }
-        else {
-          var parsed = Number(raw);
-          if (isNaN(parsed)) {
-            input.value = '';
-            delete node[meta.key];
-            showToast('「' + meta.label + '」必须是数字', true);
-          } else { node[meta.key] = parsed; }
-        }
-        markDirty();
-      });
-      wrapper.appendChild(input);
-      params.appendChild(wrapper);
-    });
-    card.appendChild(params);
-
     // 降级去向（children，按优先级排列）
     var outBar = el('div', 'edge-bar out');
-    outBar.appendChild(el('span', 'edge-label', '降级去向 →'));
-    if (!kids.length) { outBar.appendChild(el('span', 'chip', '无（到此为止）')); }
+    outBar.appendChild(el('span', 'edge-label', '降级到'));
+    if (!kids.length) { outBar.appendChild(el('span', 'chip muted', '无（链尾）')); }
     kids.forEach(function (child) {
       var chip = el('span', 'chip edge-chip', child);
       var remove = el('button', 'btn icon danger', '×');
@@ -672,15 +783,16 @@
       chip.appendChild(remove);
       outBar.appendChild(chip);
     });
-    var select = el('select');
-    var emptyOption = el('option', '', '＋ 添加降级目标');
+    var select = el('select', 'edge-add');
+    var emptyOption = el('option', '', '＋');
     emptyOption.value = '';
+    emptyOption.title = '添加降级目标';
     select.appendChild(emptyOption);
     allModels().forEach(function (candidate) {
       if (candidate === modelName) { return; }
       if (kids.indexOf(candidate) >= 0) { return; }
       if (wouldCreateCycle(modelName, candidate)) { return; }
-      var option = el('option', '', candidate + '（' + (router[candidate].provider || '?') + '）');
+      var option = el('option', '', candidate);
       option.value = candidate;
       select.appendChild(option);
     });
@@ -692,15 +804,83 @@
     outBar.appendChild(select);
     card.appendChild(outBar);
 
-    // 被谁降级进来（反向邻接，只读）
-    var inBar = el('div', 'edge-bar in');
-    inBar.appendChild(el('span', 'edge-label', '被谁降级进来 ←'));
-    if (!parents.length) {
-      inBar.appendChild(el('span', 'chip', '无（顶层，可直接作为首选）'));
-    } else {
+    // 被谁降级进来：没有入边就不占一行
+    if (parents.length) {
+      var inBar = el('div', 'edge-bar in');
+      inBar.appendChild(el('span', 'edge-label', '来自'));
       parents.forEach(function (parent) { inBar.appendChild(el('span', 'chip in-chip', parent)); });
+      card.appendChild(inBar);
     }
-    card.appendChild(inBar);
+
+    // 参数默认折叠：常用界面只留链路信息
+    var details = document.createElement('details');
+    details.className = 'node-params';
+    var summary = document.createElement('summary');
+    summary.textContent = paramSummary(node);
+    details.appendChild(summary);
+    var paramsBody = el('div', 'params-body');
+
+    // 上游真实模型：从该供应商的模型清单里选
+    var remoteWrap = el('div', 'param wide');
+    remoteWrap.appendChild(el('label', '', '上游模型 remote_model'));
+    var remoteSelect = el('select');
+    var sameOption = el('option', '', '与节点名相同');
+    sameOption.value = '';
+    remoteSelect.appendChild(sameOption);
+    var remoteOptions = catalogModels(node.provider).slice();
+    if (node.remote_model && remoteOptions.indexOf(node.remote_model) < 0) { remoteOptions.push(node.remote_model); }
+    remoteOptions.sort();
+    remoteOptions.forEach(function (candidate) {
+      var option = el('option', '', candidate);
+      option.value = candidate;
+      if (candidate === node.remote_model) { option.selected = true; }
+      remoteSelect.appendChild(option);
+    });
+    remoteSelect.addEventListener('change', function () {
+      if (remoteSelect.value) { node.remote_model = remoteSelect.value; } else { delete node.remote_model; }
+      markDirty(); renderDag();
+    });
+    remoteWrap.appendChild(remoteSelect);
+    paramsBody.appendChild(remoteWrap);
+
+    // 每节点策略参数：留空 = 继承 defaults
+    PARAM_META.forEach(function (meta) {
+      var wrapper = el('div', 'param');
+      wrapper.appendChild(el('label', '', meta.label));
+      var input = el('input');
+      input.type = 'number';
+      input.step = meta.step;
+      input.min = meta.min;
+      var current = node[meta.key];
+      if ((current === undefined || current === null) && node.policy) { current = node.policy[meta.key]; }
+      input.value = (current === undefined || current === null) ? '' : current;
+      input.placeholder = '默认 ' + fmtNum(state.config.defaults[meta.key]);
+      input.title = meta.hint;
+      input.setAttribute('aria-label', modelName + ' ' + meta.label);
+      input.addEventListener('change', function () {
+        var raw = input.value.trim();
+        if (raw === '') {
+          delete node[meta.key];
+          if (node.policy) {
+            delete node.policy[meta.key];
+            if (!Object.keys(node.policy).length) { delete node.policy; }
+          }
+        } else {
+          var parsed = Number(raw);
+          if (isNaN(parsed)) {
+            input.value = '';
+            delete node[meta.key];
+            showToast('「' + meta.label + '」必须是数字', true);
+          } else { node[meta.key] = parsed; }
+        }
+        markDirty();
+        summary.textContent = paramSummary(node);
+      });
+      wrapper.appendChild(input);
+      paramsBody.appendChild(wrapper);
+    });
+    details.appendChild(paramsBody);
+    card.appendChild(details);
 
     cardIndex[modelName] = card;
     return card;
@@ -710,6 +890,10 @@
     var forest = $('forest');
     if (!forest) { return; }
     forest.textContent = '';
+    var catalogHint = $('catalogHint');
+    if (catalogHint) {
+      catalogHint.textContent = '已记录 ' + allKnownModelNames().length + ' 个模型名 · 新增节点直接从清单里选';
+    }
     cardIndex = {};
     edgePairs = [];
 
@@ -1034,19 +1218,72 @@
     showToast('已改名：' + oldName + ' → ' + newName);
   }
 
-  function addModel() {
-    var name = $('newNodeName').value.trim();
+  function fillNodeModelOptions() {
     var provider = $('newNodeProvider').value;
-    if (!name) { showToast('请填写模型名', true); return; }
-    if (state.config.router[name]) { showToast('模型「' + name + '」已存在', true); return; }
-    if (!provider) { showToast('请先添加供应商', true); return; }
-    state.config.router[name] = { provider: provider, children: [], entry: true };
-    $('newNodeName').value = '';
-    markDirty(); renderDag();
-    showToast('已新增模型：' + name);
+    var select = $('newNodeName');
+    var hint = $('nodeDialogHint');
+    select.textContent = '';
+    var names = catalogModels(provider).concat(catalogModels('__codex__'));
+    var unique = [];
+    names.forEach(function (name) { if (unique.indexOf(name) < 0) { unique.push(name); } });
+    unique.sort();
+    var existing = state.config.router || {};
+    var available = unique.filter(function (name) { return !existing[name]; });
+    if (!available.length) {
+      var option = el('option', '', '（暂无可用模型，先同步模型清单）');
+      option.value = '';
+      select.appendChild(option);
+      hint.textContent = unique.length
+        ? '该供应商的模型都已经在链路里了。'
+        : '该供应商还没有模型清单；点「同步模型清单」自动抓取。';
+      return;
+    }
+    available.forEach(function (name) {
+      var option = el('option', '', name);
+      option.value = name;
+      select.appendChild(option);
+    });
+    hint.textContent = '来源：' + (provider || '模型清单') + '，共 ' + available.length + ' 个可添加。';
+    if (!catalogModels(provider).length) {
+      hint.textContent += ' 供应商清单为空，当前展示 Codex 清单。';
+    }
   }
 
-  /* ---------- 试运行 ---------- */
+  function openNodeDialog() {
+    var providerSelect = $('newNodeProvider');
+    providerSelect.textContent = '';
+    var providers = state.config.providers || {};
+    Object.keys(providers).sort().forEach(function (name) {
+      var option = el('option', '', name + (providers[name].enabled === false ? '（已停用）' : ''));
+      option.value = name;
+      providerSelect.appendChild(option);
+    });
+    if (!Object.keys(providers).length) {
+      showToast('请先在「供应商」页添加供应商', true);
+      return;
+    }
+    fillNodeModelOptions();
+    var dialog = $('nodeDialog');
+    if (dialog && typeof dialog.showModal === 'function') { dialog.showModal(); }
+    else { showToast('当前浏览器不支持弹窗，请换 Chrome/Edge', true); }
+    if (!catalogModels(providerSelect.value).length) {
+      syncProviderModels(providerSelect.value).then(fillNodeModelOptions);
+    }
+  }
+
+  function addModelFromDialog() {
+    var name = $('newNodeName').value;
+    var provider = $('newNodeProvider').value;
+    if (!name) { showToast('请选择模型（没有清单就先同步）', true); return false; }
+    if (!provider) { showToast('请选择供应商', true); return false; }
+    if (state.config.router[name]) { showToast('模型「' + name + '」已在链路中', true); return false; }
+    state.config.router[name] = { provider: provider, children: [], entry: true };
+    markDirty();
+    renderDag();
+    showToast('已新增节点：' + name);
+    return true;
+  }
+
   function simulate() {
     var entry = $('simEntry').value;
     if (!entry || !state.config.router[entry]) { showToast('请选择首选模型', true); return; }
@@ -1242,6 +1479,7 @@
       if (result.retry_on.keywords[meta.key] === undefined) { result.retry_on.keywords[meta.key] = false; }
     });
     result.providers = result.providers || {};
+    result.model_catalog = result.model_catalog || {};
     Object.keys(result.providers).forEach(function (name) {
       var provider = result.providers[name];
       if (provider.enabled === undefined) { provider.enabled = true; }
@@ -1472,7 +1710,16 @@
     $('newStatus').addEventListener('keydown', function (event) {
       if (event.key === 'Enter') { event.preventDefault(); $('btnAddStatus').click(); }
     });
-    $('btnAddNode').addEventListener('click', addModel);
+    $('btnAddNode').addEventListener('click', openNodeDialog);
+    $('btnSyncModels').addEventListener('click', syncModelCatalog);
+    $('btnSyncCodexModels').addEventListener('click', function () { syncCodexModels(false); });
+    $('newNodeProvider').addEventListener('change', fillNodeModelOptions);
+    $('nodeForm').addEventListener('submit', function (event) {
+      var submitter = event.submitter;
+      if (submitter && submitter.value === 'cancel') { return; }
+      event.preventDefault();
+      if (addModelFromDialog()) { $('nodeDialog').close(); }
+    });
     $('btnAddProvider').addEventListener('click', addProvider);
     $('btnAddRule').addEventListener('click', addRule);
     $('btnSimulate').addEventListener('click', simulate);

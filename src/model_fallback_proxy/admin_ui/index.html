@@ -99,30 +99,21 @@
       <!-- 降级链路 -->
       <section id="page-dag" class="page hidden">
         <div class="card">
-          <div class="card-head">
-            <h2>降级链路（DAG）</h2>
-            <p class="hint">
-              上方是首选模型，失败后沿箭头向下降级，最下方是最后兜底。
-              一个节点可以有多个降级目标，因此是 DAG；被多条路径指向的节点只展开一次。
-            </p>
+          <div class="card-head dag-head">
+            <div>
+              <h2>降级链路</h2>
+              <p class="hint">上方首选 → 下方兜底；参数默认收起，点卡片里的「参数」再展开。</p>
+            </div>
+            <div class="dag-actions">
+              <button id="btnSyncModels" class="btn small" type="button">同步模型清单</button>
+              <button id="btnAddNode" class="btn small primary" type="button">+ 新增节点</button>
+            </div>
           </div>
           <div class="card-body">
-            <div class="legend">
-              <span><b>↑ 上方</b> = 首选（最先尝试，通常是免费渠道）</span>
-              <span><b>↓ 下方</b> = 兜底（最后尝试，通常是自付费渠道）</span>
-              <span>卡片内「降级去向 →」是 children，「被谁降级进来 ←」是反向邻接</span>
-            </div>
-            <div class="toolbar">
-              <div class="inline-form">
-                <input id="newNodeName" type="text" placeholder="新模型名，如 glm-5-3-flash">
-                <select id="newNodeProvider"></select>
-                <button id="btnAddNode" class="btn small" type="button">新增模型节点</button>
-              </div>
-              <a class="link small" href="#/providers">管理供应商</a>
-            </div>
-            <div id="providersBox" class="pill-row"></div>
+            <div id="providersBox" class="pill-row compact"></div>
+            <div id="catalogHint" class="muted small"></div>
             <div id="forest" class="forest"></div>
-            <div id="forestEmpty" class="empty hidden">还没有任何模型节点，先用上面的表单新增一个入口模型。</div>
+            <div id="forestEmpty" class="empty hidden">还没有模型节点，点「+ 新增节点」从模型清单里选一个。</div>
           </div>
         </div>
       </section>
@@ -179,6 +170,20 @@
             </div>
           </div>
         </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h2>Codex 模型清单</h2>
+            <p class="hint">从 ~/.codex/models.json 读取，给新增节点和重命名下拉框使用。</p>
+          </div>
+          <div class="card-body">
+            <div class="toolbar">
+              <span id="codexCatalogInfo" class="muted small">未同步</span>
+              <button id="btnSyncCodexModels" class="btn small" type="button">读取 Codex 清单</button>
+            </div>
+            <div id="codexCatalogBox" class="pill-row compact"></div>
+          </div>
+        </div>
       </section>
 
       <!-- 特殊规则 -->
@@ -227,6 +232,25 @@
     </main>
   </div>
 </div>
+
+<dialog id="nodeDialog" class="dialog">
+  <form id="nodeForm" method="dialog">
+    <h3>新增模型节点</h3>
+    <label class="dialog-field">
+      <span>供应商</span>
+      <select id="newNodeProvider"></select>
+    </label>
+    <label class="dialog-field">
+      <span>模型</span>
+      <select id="newNodeName"></select>
+    </label>
+    <p id="nodeDialogHint" class="muted small"></p>
+    <div class="dialog-actions">
+      <button type="submit" value="cancel" class="btn" formnovalidate>取消</button>
+      <button type="submit" value="ok" class="btn primary">添加</button>
+    </div>
+  </form>
+</dialog>
 
 <div id="toast" class="toast hidden"></div>
 <script src="app.js"></script>
