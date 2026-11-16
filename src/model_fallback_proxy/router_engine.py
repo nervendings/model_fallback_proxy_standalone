@@ -1106,6 +1106,20 @@ async def handleAdminResetCooldowns(request: web.Request) -> web.Response:
 
 
 ADMIN_UI_DIR = Path(__file__).resolve().parent / "admin_ui"
+# 管理台前端随版本更新，禁止浏览器启发式缓存，避免改了看不到
+ADMIN_UI_NO_CACHE_HEADERS = {"Cache-Control": "no-store, must-revalidate", "Pragma": "no-cache"}
+_ADMIN_ASSET_REF_RE = re.compile(r'((?:href|src)=")(style\.css|app\.js)(?:\?v=[^"]*)?"')
+
+
+def versionAdminHtml(html: str) -> str:
+    """给 index.html 的静态资源加版本号，避免浏览器继续用旧 app.js。"""
+    version = readVersion()
+
+    def _repl(match: "re.Match[str]") -> str:
+        return '%s%s?v=%s"' % (match.group(1), match.group(2), version)
+
+    return _ADMIN_ASSET_REF_RE.sub(_repl, html)
+
 
 
 async def handleAdminIndex(request: web.Request) -> web.Response:
@@ -1115,7 +1129,12 @@ async def handleAdminIndex(request: web.Request) -> web.Response:
             {"ok": False, "error": "admin_ui 未部署，请检查 " + str(ADMIN_UI_DIR)},
             status=404,
         )
-    return web.Response(text=index.read_text(encoding="utf-8"), content_type="text/html")
+    html = versionAdminHtml(index.read_text(encoding="utf-8"))
+    return web.Response(
+        text=html,
+        content_type="text/html",
+        headers=ADMIN_UI_NO_CACHE_HEADERS,
+    )
 
 
 async def handleAdminAsset(request: web.Request) -> web.Response:
@@ -1127,6 +1146,7 @@ async def handleAdminAsset(request: web.Request) -> web.Response:
     return web.Response(
         text=asset.read_text(encoding="utf-8"),
         content_type=suffixTypes.get(asset.suffix, "text/plain"),
+        headers=ADMIN_UI_NO_CACHE_HEADERS,
     )
 
 

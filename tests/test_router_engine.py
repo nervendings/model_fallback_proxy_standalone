@@ -323,6 +323,20 @@ class TestSpecialRules(UpstreamHarness):
             Path(__file__).resolve().parents[1].joinpath("configs/router.json")
             .read_text(encoding="utf-8"))), "")
 
+    def testAdminHtmlAssetsCarryVersion(self):
+        # 前端资源必须带 ?v=版本号，否则浏览器会一直用旧 app.js
+        html = '<link rel="stylesheet" href="style.css"><script src="app.js"></script>'
+        out = engine.versionAdminHtml(html)
+        self.assertIn('style.css?v=', out)
+        self.assertIn('app.js?v=', out)
+        self.assertNotIn('style.css"', out)
+
+    def testAdminHtmlVersionReplacesOldValue(self):
+        html = '<script src="app.js?v=0.0.1"></script>'
+        out = engine.versionAdminHtml(html)
+        self.assertNotIn('v=0.0.1', out)
+        self.assertIn('app.js?v=', out)
+
 
 if __name__ == "__main__":
     unittest.main()
