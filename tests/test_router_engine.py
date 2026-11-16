@@ -201,6 +201,28 @@ class TestRouting(UpstreamHarness):
         self.assertEqual(resp.status, 200)
         self.assertEqual(self.received[0][1]["model"], "some-new-model")
 
+    async def testUnknownModelUsesCatchAllAfterDefaultProviderFails(self):
+        def mutate(cfg):
+            cfg["router"]["*"] = {"provider": "fake_b", "remote_model": "real-b1", "children": []}
+        self.patchConfig(mutate)
+        self.scriptA.append(("json", 429, {"error": {"message": "capacity exceeded"}}))
+        self.scriptA.append(("json", 429, {"error": {"message": "capacity exceeded"}}))
+        self.scriptB.append(("json", 200, {"id": "caught"}))
+        resp = await self.post("brand-new-model")
+        self.assertEqual(resp.status, 200)
+        self.assertEqual([r[0] for r in self.received], ["A", "A", "B"])
+        self.assertEqual(self.received[-1][1]["model"], "real-b1")
+
+    async def testPatternKeyServesMatchingModel(self):
+        def mutate(cfg):
+            cfg["router"]["gpt-*"] = {"provider": "fake_b", "children": []}
+        self.patchConfig(mutate)
+        self.scriptB.append(("json", 200, {"id": "pattern"}))
+        resp = await self.post("gpt-9-ultra")
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(self.received[0][0], "B")
+        self.assertEqual(self.received[0][1]["model"], "gpt-9-ultra")
+
     async def testFirstByteTimeoutDowngrades(self):
         def mutate(cfg):
             cfg["defaults"]["first_byte_timeout_s"] = 0.3
@@ -248,6 +270,35 @@ class TestConfigValidation(unittest.TestCase):
         cfg = self.validBase()
         cfg["router"]["m_a1"]["remote_model"] = "  "
         self.assertIn("remote_model", engine.validateConfig(cfg))
+
+    def testCatchAllAppendedForKnownChain(self):
+        cfg = self.validBase()
+        cfg["router"]["*"] = {"provider": "fake_b", "children": []}
+        state = engine.RouterState(engine.RouterConfig(cfg))
+        order = [c.model for c in state.buildCandidates("m_a1")]
+        self.assertEqual(order[-1], "*")
+
+    def testCatchAllNotDuplicatedWhenSameUpstream(self):
+        cfg = self.validBase()
+        cfg["router"]["*"] = {"provider": "fake_b", "remote_model": "real-b1", "children": []}
+        state = engine.RouterState(engine.RouterConfig(cfg))
+        chain = [(c.provider, c.remote_model) for c in state.buildCandidates("m_b1")]
+        self.assertEqual(chain.count(("fake_b", "real-b1")), 1)
+
+    def testPatternSpecificityWins(self):
+        cfg = self.validBase()
+        cfg["router"]["gpt-*"] = {"provider": "fake_a", "children": []}
+        cfg["router"]["gpt-6-*"] = {"provider": "fake_b", "children": []}
+        state = engine.RouterState(engine.RouterConfig(cfg))
+        chain = state.buildCandidates("gpt-6-astra")
+        self.assertEqual(chain[0].model, "gpt-6-astra")
+        self.assertEqual(chain[0].provider, "fake_b")
+
+    def testRejectPatternAsChild(self):
+        cfg = self.validBase()
+        cfg["router"]["gpt-*"] = {"provider": "fake_a", "children": []}
+        cfg["router"]["m_a1"]["children"] = ["gpt-*"]
+        self.assertIn("通配节点", engine.validateConfig(cfg))
 
     def testDfsOrderRespectsChildrenPriority(self):
         cfg = self.validBase()

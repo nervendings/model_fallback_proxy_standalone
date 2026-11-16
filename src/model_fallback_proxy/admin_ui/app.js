@@ -425,6 +425,11 @@
   }
 
   // 反向邻接：model -> 哪些节点的 children 指向它
+  // 节点名含 * 或 ? 视为通配键；单独的 * 是全局兜底
+  function isPatternName(name) {
+    return !!name && (name === '*' || name.indexOf('*') >= 0 || name.indexOf('?') >= 0);
+  }
+
   function parentMap(config) {
     var router = routerOf(config);
     var map = {};
@@ -449,11 +454,12 @@
   // 入口（首选/叶子）：显式 entry:true 优先；否则按「没有任何节点指向它」推断
   function entryModels(config) {
     var router = routerOf(config);
-    var marked = Object.keys(router).filter(function (name) { return router[name].entry === true; });
+    var names = Object.keys(router).filter(function (name) { return !isPatternName(name); });
+    var marked = names.filter(function (name) { return router[name].entry === true; });
     if (marked.length) { return marked.sort(); }
     var used = childSet(config);
-    var inferred = Object.keys(router).filter(function (name) { return !used[name]; });
-    return (inferred.length ? inferred : Object.keys(router)).sort();
+    var inferred = names.filter(function (name) { return !used[name]; });
+    return (inferred.length ? inferred : names).sort();
   }
 
   // 到 sink 的最长距离（边数）：sink=0 是兜底根，数值越大越靠上（越优先）
@@ -591,9 +597,9 @@
       warnings.push('最长降级路径为 ' + (edges + 1) + ' 层节点，建议不超过 6 层，否则单次失败会等待很久。');
     }
     if (!entryModels(config).length) { warnings.push('没有首选模型，客户端请求会找不到路由。'); }
-    var routerNames = Object.keys(config.router || {});
+    var routerNames = Object.keys(config.router || {}).filter(function (name) { return !isPatternName(name); });
     if (routerNames.length < 2) {
-      warnings.push('路由表只有 ' + routerNames.length + ' 个节点，等于没有降级链：任何失败都不会切到别的渠道。');
+      warnings.push('路由表只有 ' + routerNames.length + ' 个可降级节点，等于没有降级链：任何失败都不会切到别的渠道。');
     } else {
       var reachable = {};
       (function markReachable(list) {
@@ -607,6 +613,9 @@
       if (orphans.length) {
         warnings.push('这些节点没有上游入口，只有客户端直接指定时才用得到：' + orphans.join('、'));
       }
+    }
+    if (!config.router || !config.router['*']) {
+      warnings.push('未配置全局兜底「*」：模型清单之外的新模型不会自动降级。');
     }
     var disabled = Object.keys(config.providers || {}).filter(function (name) {
       return config.providers[name].enabled === false;
@@ -962,6 +971,7 @@
     var edgeItems = [];
     allModels().forEach(function (candidate) {
       if (candidate === modelName) { return; }
+      if (isPatternName(candidate)) { return; }
       if (kids.indexOf(candidate) >= 0) { return; }
       if (wouldCreateCycle(modelName, candidate)) { return; }
       edgeItems.push({ value: candidate, label: candidate, group: '全部模型' });
@@ -1077,13 +1087,39 @@
     edgePairs = [];
 
     var router = state.config.router || {};
-    var models = Object.keys(router);
-    if (!models.length) {
+    var allNames = Object.keys(router);
+    var catchAllName = router['*'] ? '*' : '';
+    var patternNames = allNames.filter(function (name) { return name !== '*' && isPatternName(name); });
+    var models = allNames.filter(function (name) { return !isPatternName(name); });
+    if (!models.length && !catchAllName) {
       $('forestEmpty').classList.remove('hidden');
       renderSimEntries();
       return;
     }
     $('forestEmpty').classList.add('hidden');
+
+    // 通配规则条：全局兜底 * 与通配入口（gpt-* 等）
+    var rulesBox = el('div', 'dag-rules');
+    if (catchAllName) {
+      var cnode = router['*'];
+      var cchip = el('span', 'rule-chip catch-all');
+      cchip.appendChild(el('span', 'rule-key', '*'));
+      cchip.appendChild(el('span', 'rule-desc', '全局兜底 → ' + (cnode.remote_model || '*') + ' · ' + cnode.provider));
+      rulesBox.appendChild(cchip);
+    } else {
+      var nochip = el('span', 'rule-chip warn');
+      nochip.appendChild(el('span', 'rule-key', '!'));
+      nochip.appendChild(el('span', 'rule-desc', '未设全局兜底：清单外模型不会自动降级'));
+      rulesBox.appendChild(nochip);
+    }
+    patternNames.forEach(function (name) {
+      var node = router[name];
+      var chip = el('span', 'rule-chip');
+      chip.appendChild(el('span', 'rule-key', name));
+      chip.appendChild(el('span', 'rule-desc', '→ ' + node.provider + (node.remote_model ? ' · ' + node.remote_model : '')));
+      rulesBox.appendChild(chip);
+    });
+    if (rulesBox.childNodes.length) { forest.appendChild(rulesBox); }
 
     var depthMap = depthToSink(state.config);
     var parents = parentMap(state.config);
@@ -1397,6 +1433,11 @@
     showToast('已改名：' + oldName + ' → ' + newName);
   }
 
+  function isCatchAllDialog() {
+    var box = $('newNodeCatchAll');
+    return !!(box && box.checked);
+  }
+
   function fillNodeModelOptions() {
     var provider = $('newNodeProvider').value;
     var wrap = $('newNodeNameWrap');
@@ -1409,7 +1450,9 @@
     names.forEach(function (name) { if (unique.indexOf(name) < 0) { unique.push(name); } });
     unique.sort();
     var existing = state.config.router || {};
-    var available = unique.filter(function (name) { return !existing[name]; });
+    var available = isCatchAllDialog()
+      ? unique.slice()
+      : unique.filter(function (name) { return !existing[name]; });
     if (!available.length) {
       wrap.appendChild(el('div', 'picker-empty', '（暂无可用模型，先同步模型清单）'));
       hint.textContent = unique.length
@@ -1430,6 +1473,9 @@
     hidden.value = available[0];
     wrap.appendChild(picker);
     hint.textContent = '来源：' + (provider || '模型清单') + '，共 ' + available.length + ' 个可添加。';
+    if (isCatchAllDialog()) {
+      hint.textContent = '将创建全局兜底「*」：任何模型失败后都会尝试这个远端模型。';
+    }
     if (!catalogModels(provider).length) {
       hint.textContent += ' 供应商清单为空，当前展示 Codex 清单。';
     }
@@ -1462,6 +1508,17 @@
     var provider = $('newNodeProvider').value;
     if (!name) { showToast('请选择模型（没有清单就先同步）', true); return false; }
     if (!provider) { showToast('请选择供应商', true); return false; }
+    if (isCatchAllDialog()) {
+      if (state.config.router['*']) { showToast('全局兜底「*」已存在，直接改它的供应商/远端模型即可', true); return false; }
+      state.config.router['*'] = {
+        provider: provider, remote_model: name, children: [],
+        comment: '全局兜底：任何模型失败后都会走到这里'
+      };
+      markDirty();
+      renderDag();
+      showToast('已新增全局兜底 * → ' + name);
+      return true;
+    }
     if (state.config.router[name]) { showToast('模型「' + name + '」已在链路中', true); return false; }
     state.config.router[name] = { provider: provider, children: [], entry: true };
     markDirty();
@@ -1522,6 +1579,17 @@
 
     walk(entry, 0, []);
 
+    // 与后端一致：链尾追加全局兜底 *；同供应商+同远端模型不重复
+    var catchNode = (state.config.router || {})['*'];
+    if (catchNode) {
+      var signature = catchNode.provider + '::' + (catchNode.remote_model || '*');
+      var duplicated = rows.some(function (row) {
+        var rowNode = state.config.router[row.model] || {};
+        return (row.provider + '::' + (rowNode.remote_model || row.model)) === signature;
+      });
+      if (!duplicated) { walk('*', 0, []); }
+    }
+
     var tbody = $('simTable').querySelector('tbody');
     tbody.textContent = '';
     if (!rows.length) {
@@ -1536,7 +1604,8 @@
       cumulative += row.waitMs || 0;
       var tr = el('tr');
       tr.appendChild(el('td', '', String(index + 1)));
-      tr.appendChild(el('td', '', row.model));
+      var rowLabel = row.model === '*' ? ('* → ' + (((state.config.router || {})['*'] || {}).remote_model || '')) : row.model;
+      tr.appendChild(el('td', '', rowLabel));
       tr.appendChild(el('td', '', row.provider || '-'));
       tr.appendChild(el('td', '', row.attempt));
       tr.appendChild(el('td', '', row.waitMs ? ('+ ' + row.waitMs + ' ms') : '—'));
@@ -1897,6 +1966,15 @@
       if (event.key === 'Enter') { event.preventDefault(); $('btnAddStatus').click(); }
     });
     $('btnAddNode').addEventListener('click', openNodeDialog);
+    var catchAllBox = $('newNodeCatchAll');
+    if (catchAllBox) {
+      catchAllBox.addEventListener('change', function () {
+        $('nodeDialogHint').textContent = catchAllBox.checked
+          ? '全局兜底模式：节点名固定为 *，选中的模型作为远端模型。'
+          : '';
+        fillNodeModelOptions();
+      });
+    }
     $('btnSyncModels').addEventListener('click', syncModelCatalog);
     $('btnSyncCodexModels').addEventListener('click', function () { syncCodexModels(false); });
     $('newNodeProvider').addEventListener('change', fillNodeModelOptions);

@@ -44,8 +44,14 @@ class Ark41RouteTest(unittest.TestCase):
         """全链最后一站：不能有 children，且其它根节点都应指向它。"""
         self.assertEqual(self.cfg["router"][SLUG]["children"], [],
                          "最后一站不能有下级，否则它不是终点")
-        sinks = [k for k, v in self.cfg["router"].items() if not v.get("children")]
+        # 全局兜底 * 也是无 child 的终点节点，单独校验；其余 sink 仍只能是它
+        sinks = [k for k, v in self.cfg["router"].items()
+                 if not v.get("children") and k != "*"]
         self.assertEqual(sinks, [SLUG], "应当只有这一个 sink：%s" % sinks)
+        catchAll = self.cfg["router"].get("*")
+        self.assertIsNotNone(catchAll, "router.json 缺少全局兜底 * 节点")
+        self.assertEqual(catchAll["provider"], "ark-official")
+        self.assertEqual(catchAll.get("remote_model"), SLUG)
 
     def test_former_sinks_now_point_to_it(self):
         for name in ("glm-5-3", "zai-org/glm-5.3", "zai-org/glm-5.3-flash"):

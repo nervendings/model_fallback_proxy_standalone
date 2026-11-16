@@ -59,6 +59,26 @@ KEYWORD_CHECKS = {
 }
 
 
+def isPatternKey(name: str) -> bool:
+    """节点名含 * 或 ? 视为通配键；单独的 * 是全局兜底，不算入口通配。"""
+    return "*" in name or "?" in name
+
+
+def globMatch(pattern: str, name: str) -> bool:
+    """只支持 * 与 ?，其余字符按字面匹配；大小写敏感。"""
+    if not pattern or not name:
+        return False
+    parts = []
+    for ch in pattern:
+        if ch == "*":
+            parts.append(".*")
+        elif ch == "?":
+            parts.append(".")
+        else:
+            parts.append(re.escape(ch))
+    return re.match("^" + "".join(parts) + "$", name) is not None
+
+
 def defaultConfig() -> dict[str, Any]:
     """兜底配置：等价旧单上游 + 线性链行为，保证缺文件时服务可用。"""
     return {
@@ -224,6 +244,30 @@ class RouterConfig:
             cooldown_s=int(merged["cooldown_s"]),
         )
 
+    def catchAllKey(self) -> str:
+        """返回全局兜底节点名（约定为 *），未配置时返回空串。"""
+        for key in self.router:
+            if key.strip() == "*":
+                return key
+        return ""
+
+    def patternKeys(self) -> list[str]:
+        """可作为入口匹配的通配键，排除全局兜底 * 本身。"""
+        return [k for k in self.router if k.strip() != "*" and isPatternKey(k)]
+
+    def matchPattern(self, model: str) -> str:
+        """按「字面量最多 → 模式最长」挑最具体的通配键；无命中返回空串。"""
+        best = ""
+        bestScore = (-1, -1)
+        for key in self.patternKeys():
+            if not globMatch(key, model):
+                continue
+            literal = len(key.replace("*", "").replace("?", ""))
+            score = (literal, len(key))
+            if score > bestScore:
+                best, bestScore = key, score
+        return best
+
     def isRetryableStatus(self, status: int) -> bool:
         return status in self.retry_http_status
 
@@ -275,6 +319,8 @@ def validateConfig(raw: Any) -> str:
         for child in children:
             if child not in router:
                 return f"节点 {name} 的降级目标 {child} 不在 router 中"
+            if isPatternKey(child):
+                return f"通配节点 {child} 只能被模型名匹配命中，不能作为降级目标"
         remote = node.get("remote_model")
         if "remote_model" in node and (
             not isinstance(remote, str) or (remote and not remote.strip())
@@ -447,31 +493,67 @@ class RouterState:
         return self.node_blocked_until.get(model_key, 0.0) <= now
 
     def buildCandidates(self, requested_model: str) -> list[Candidate]:
-        """DAG 展开：请求模型优先，随后按 children 顺序深度优先向下兜底。"""
+        """DAG 展开：请求模型优先，向下按 children 兜底，最后接全局兜底节点 *。
+
+        入口解析顺序：精确节点名 → 最具体的通配键（gpt-*）→ 默认供应商直连。
+        全局兜底节点 * 追加到任意链尾；若链上已有同一供应商+同一远端模型的节点，
+        不重复追加，避免同一次请求对同一上游打两遍。
+        """
         router = self.config.router
-        if requested_model not in router:
-            return []
         visited: set[str] = set()
         candidates: list[Candidate] = []
+
+        def append(name: str, path: list[str], modelLabel: str | None = None,
+                   policySource: str | None = None) -> None:
+            node = router[name]
+            candidates.append(
+                Candidate(
+                    model=modelLabel or name,
+                    provider=str(node["provider"]),
+                    remote_model=str(node.get("remote_model") or (modelLabel or name)),
+                    policy=self.config.nodePolicy(policySource or name),
+                    path=path,
+                )
+            )
 
         def walk(model: str, path: list[str]) -> None:
             if model in visited:
                 return
             visited.add(model)
-            node = router[model]
-            candidates.append(
-                Candidate(
-                    model=model,
-                    provider=str(node["provider"]),
-                    remote_model=str(node.get("remote_model") or model),
-                    policy=self.config.nodePolicy(model),
-                    path=path + [model],
-                )
-            )
-            for child in node.get("children", []):
+            append(model, path + [model])
+            for child in router[model].get("children", []):
                 walk(child, path + [model])
 
-        walk(requested_model, [])
+        if requested_model and requested_model in router:
+            walk(requested_model, [])
+        elif requested_model:
+            pattern = self.config.matchPattern(requested_model)
+            if pattern:
+                visited.add(pattern)
+                append(pattern, [pattern], modelLabel=requested_model, policySource=pattern)
+                for child in router[pattern].get("children", []):
+                    walk(child, [pattern])
+            else:
+                defaultProvider = str(os.getenv("CODEX_ROUTER_DEFAULT_PROVIDER", "sub2api"))
+                if requested_model and defaultProvider in self.config.providers:
+                    candidates.append(
+                        Candidate(
+                            model=requested_model,
+                            provider=defaultProvider,
+                            remote_model=requested_model,
+                            policy=self.config.nodePolicy(requested_model),
+                            path=[requested_model],
+                        )
+                    )
+
+        catchAll = self.config.catchAllKey()
+        if catchAll and catchAll not in visited:
+            node = router[catchAll]
+            signature = (str(node["provider"]), str(node.get("remote_model") or catchAll))
+            already = any((c.provider, c.remote_model) == signature for c in candidates)
+            if not already or not candidates:
+                walk(catchAll, [])
+
         return candidates
 
     def recordEvent(self, fromKey: str, toKey: str, kind: str, reason: str) -> None:
@@ -497,6 +579,7 @@ class RouterState:
             "ok": True,
             "mode": "dag",
             "policy_version": self.config.raw.get("policy_version"),
+            "catch_all": self.config.catchAllKey(),
             "model_chain": self.model_chain,
             "cooldowns_seconds": {
                 key: max(0, round(deadline - now))

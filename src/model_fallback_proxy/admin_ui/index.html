@@ -9,7 +9,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>模型降级路由管理台</title>
-<link rel="stylesheet" href="style.css?v=0.6.11">
+<link rel="stylesheet" href="style.css?v=0.7.0">
 </head>
 <body>
 <div class="app">
@@ -245,6 +245,13 @@
       <div id="newNodeNameWrap" class="dialog-picker-wrap"></div>
       <input type="hidden" id="newNodeName">
     </label>
+    <div class="dialog-field">
+      <span>作用范围</span>
+      <label class="check-inline">
+        <input type="checkbox" id="newNodeCatchAll">
+        <span>设为全局兜底「*」：任何模型失败后都走它</span>
+      </label>
+    </div>
     <p id="nodeDialogHint" class="muted small"></p>
     <div class="dialog-actions">
       <button type="submit" value="cancel" class="btn" formnovalidate>取消</button>
@@ -254,6 +261,6 @@
 </dialog>
 
 <div id="toast" class="toast hidden"></div>
-<script src="app.js?v=0.6.11"></script>
+<script src="app.js?v=0.7.0"></script>
 </body>
 </html>

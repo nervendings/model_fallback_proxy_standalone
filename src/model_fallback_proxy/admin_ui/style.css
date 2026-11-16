@@ -603,3 +603,55 @@ select option, select optgroup {
 .picker.remote-picker .picker-btn { font-size: 12px; padding: 3px 6px; }
 .dialog-picker-wrap { min-width: 0; }
 .picker.dialog-picker { width: 100%; }
+
+
+/* 通配规则条：全局兜底 * 与通配入口 */
+.dag-rules {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 12px;
+}
+
+.rule-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-2);
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.rule-chip .rule-key {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.rule-chip.catch-all {
+  border-color: color-mix(in srgb, var(--ok) 45%, var(--line));
+  background: var(--ok-weak);
+  color: var(--text);
+}
+
+.rule-chip.warn {
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--line));
+  background: var(--warn-weak);
+}
+
+.check-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.check-inline input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--accent);
+}

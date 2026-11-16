@@ -156,6 +156,16 @@
         "first_byte_timeout_s": 90
       },
       "children": []
+    },
+    "*": {
+      "provider": "ark-official",
+      "remote_model": "deepseek-v4-1-flash-261017",
+      "comment": "全局兜底（通配）：任何未在链路里的模型、任何走不到根的分支，失败后都会落到这里",
+      "policy": {
+        "retries": 0,
+        "cooldown_s": 300
+      },
+      "children": []
     }
   },
   "special_rules": [
