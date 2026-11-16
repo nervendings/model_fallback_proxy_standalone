@@ -1,5 +1,19 @@
 # 变更记录
 
+
+## 0.6.6 - 2026-11-16
+
+### 新增
+
+- 路由表新增 `deepseek-v4-1-flash-261017` 节点（火山方舟官方 `/api/v3`，按量计费）。
+  本地 Codex 由此多一个可选的 DeepSeek V4.1 Flash：`codex -p ark41` 或 `ark41` 快捷入口。
+- 新增 provider `ark-official`，与套餐通道 `ark`（`/api/coding/v3`）分开计价；
+  鉴权读 `ARK_AI_API_KEY`，不落仓库。
+
+### 说明
+
+- 该节点 children 回落 `deepseek-flash` 链路：方舟抖动/限流时会话不中断，只降级模型。
+- 未纳入 `CODEX_FALLBACK_MODEL_CHAIN`，不进自动降级链，避免策略档位被动变化。
 ## 0.6.5 - 2026-11-13
 
 - 修「闸门放弃时不回填失败签名」：repeated_failure_gave_up 只写空 retryable kind，
